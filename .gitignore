@@ -1,0 +1,13 @@
+/target/
+**/target/
+/dist/
+*.hmod
+*.hmod.partial
+*.wasm
+.DS_Store
+.idea/
+.vscode/
+__pycache__/
+*.py[cod]
+.env
+.env.*
