@@ -9,7 +9,7 @@ mod settings;
 mod unavailable;
 
 use config::{Config, NutritionConfig, STORAGE_KEY};
-use extras::{Runtime as ExtrasRuntime, Waypoint, Waypoints, WAYPOINTS_KEY};
+use extras::{Runtime as ExtrasRuntime, WAYPOINTS_KEY, Waypoint, Waypoints};
 use horizon_mod_sdk::{Mod, Registration, game, info, input, render, storage, ui, warn};
 use nutrition::Snapshot;
 
@@ -101,8 +101,16 @@ impl Utilities {
         let gaps: Vec<&str> = unavailable::GAPS.iter().map(|g| g.feature).collect();
         format!(
             "Nutrition : {}. Modules natifs : {}. {} waypoint(s). API absente : {}.",
-            if self.config.nutrition.enabled { "ON" } else { "OFF" },
-            if self.config.extras.enabled { "ON" } else { "OFF" },
+            if self.config.nutrition.enabled {
+                "ON"
+            } else {
+                "OFF"
+            },
+            if self.config.extras.enabled {
+                "ON"
+            } else {
+                "OFF"
+            },
             self.waypoints.points.len(),
             gaps.join(", ")
         )
@@ -141,7 +149,10 @@ impl Utilities {
                 self.save_waypoints();
                 Ok(Some("Waypoints supprimés".into()))
             }
-            _ => Err("Usage : /utilities wp [add NOM | select NOM | remove NOM | list | off | clear]".into()),
+            _ => Err(
+                "Usage : /utilities wp [add NOM | select NOM | remove NOM | list | off | clear]"
+                    .into(),
+            ),
         }
     }
 }

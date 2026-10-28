@@ -3,8 +3,8 @@
 //! This module intentionally does not pretend to read equipment/inventory,
 //! saturation or pickup events (none is exposed to a .hmod).
 use crate::config::ExtrasConfig;
-use horizon_mod_sdk::{game, input, render};
 use horizon_mod_sdk::render::{FillShape, Point, Rect, Shape, TextShape};
+use horizon_mod_sdk::{game, input, render};
 
 pub const WAYPOINTS_KEY: &str = "waypoints.v1";
 const MAX_WAYPOINTS: usize = 8;
@@ -94,7 +94,9 @@ impl Waypoints {
     }
 
     pub fn selected(&self) -> Option<&Waypoint> {
-        self.points.iter().find(|p| Some(p.name.as_str()) == self.active.as_deref())
+        self.points
+            .iter()
+            .find(|p| Some(p.name.as_str()) == self.active.as_deref())
     }
 
     pub fn encode(&self) -> Vec<u8> {
@@ -219,9 +221,15 @@ impl Runtime {
     pub fn hand(&mut self, held: Option<input::HeldItem>, tick: u64, track: bool) {
         if track {
             if let (Some(before), Some(after)) = (&self.last_held, &held) {
-                if before.slot == after.slot && before.id == after.id && before.count != after.count {
+                if before.slot == after.slot && before.id == after.id && before.count != after.count
+                {
                     let delta = i64::from(after.count) - i64::from(before.count);
-                    let label = after.id.rsplit(':').next().unwrap_or(&after.id).replace('_', " ");
+                    let label = after
+                        .id
+                        .rsplit(':')
+                        .next()
+                        .unwrap_or(&after.id)
+                        .replace('_', " ");
                     self.notice = Some((
                         format!("Main {delta:+} {label} (cause inconnue)"),
                         tick.saturating_add(60),
@@ -383,10 +391,17 @@ mod tests {
     fn capacity_and_replacement() {
         let mut w = Waypoints::default();
         for i in 0..8 {
-            w.add(Waypoint::at(&format!("w{i}"), "minecraft:overworld", i as f64, 1.0, 2.0).unwrap()).unwrap();
+            w.add(
+                Waypoint::at(&format!("w{i}"), "minecraft:overworld", i as f64, 1.0, 2.0).unwrap(),
+            )
+            .unwrap();
         }
-        assert!(w.add(Waypoint::at("too-many", "minecraft:overworld", 0.0, 0.0, 0.0).unwrap()).is_err());
-        w.add(Waypoint::at("w0", "minecraft:overworld", 9.0, 1.0, 2.0).unwrap()).unwrap();
+        assert!(
+            w.add(Waypoint::at("too-many", "minecraft:overworld", 0.0, 0.0, 0.0).unwrap())
+                .is_err()
+        );
+        w.add(Waypoint::at("w0", "minecraft:overworld", 9.0, 1.0, 2.0).unwrap())
+            .unwrap();
         assert_eq!(w.points.len(), 8);
     }
 }

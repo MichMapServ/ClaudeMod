@@ -85,14 +85,45 @@ pub fn widgets(config: &Config) -> Vec<Widget> {
         ),
         button(OPACITY, format!("Opacité : {} %", n.opacity_percent())),
         line(3, "Modules natifs (100 % hmod)", 0x66CCFF),
-        button(EXTRAS, format!("Modules actifs : {}", on_off(config.extras.enabled))),
-        button(PERFORMANCE, format!("FPS / CPS : {}", on_off(config.extras.performance))),
-        button(SURVIVAL, format!("Alertes faim et vie : {}", on_off(config.extras.survival_alerts))),
-        button(HELD_CHANGES, format!("Variations main (pas pickups) : {}", on_off(config.extras.held_changes))),
-        button(NAVIGATION, format!("Waypoints : {}", on_off(config.extras.navigation))),
-        button(MINIMAP, format!("Mini-carte : {}", on_off(config.extras.minimap))),
-        button(ROTATE_MAP, format!("Mini-carte orientée : {}", on_off(config.extras.rotate_map))),
-        line(4, "Points : /utilities wp add NOM | list | select NOM | remove NOM", 0xAAAAAA),
+        button(
+            EXTRAS,
+            format!("Modules actifs : {}", on_off(config.extras.enabled)),
+        ),
+        button(
+            PERFORMANCE,
+            format!("FPS / CPS : {}", on_off(config.extras.performance)),
+        ),
+        button(
+            SURVIVAL,
+            format!(
+                "Alertes faim et vie : {}",
+                on_off(config.extras.survival_alerts)
+            ),
+        ),
+        button(
+            HELD_CHANGES,
+            format!(
+                "Variations main (pas pickups) : {}",
+                on_off(config.extras.held_changes)
+            ),
+        ),
+        button(
+            NAVIGATION,
+            format!("Waypoints : {}", on_off(config.extras.navigation)),
+        ),
+        button(
+            MINIMAP,
+            format!("Mini-carte : {}", on_off(config.extras.minimap)),
+        ),
+        button(
+            ROTATE_MAP,
+            format!("Mini-carte orientée : {}", on_off(config.extras.rotate_map)),
+        ),
+        line(
+            4,
+            "Points : /utilities wp add NOM | list | select NOM | remove NOM",
+            0xAAAAAA,
+        ),
         button(RESET, "Réinitialiser les réglages".to_string()),
         line(2, "Indisponible (API Horizon 0.1) :", 0xFFAA55),
     ];
