@@ -1,0 +1,68 @@
+name: Import HorizonUtilities and build
+
+on:
+  push:
+    branches: [main]
+    paths: [".bootstrap/HorizonUtilities.tar.bz2", ".github/workflows/import-horizon-utilities.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  import-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: true
+      - name: Unpack and commit source files
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f .bootstrap/HorizonUtilities.tar.bz2 ]]; then
+            tar -tjf .bootstrap/HorizonUtilities.tar.bz2 | grep -qx "mods/HorizonUtilities/src/lib.rs"
+            tar -xjf .bootstrap/HorizonUtilities.tar.bz2
+            test -f mods/HorizonUtilities/horizon-mod.toml
+            test -f mods/HorizonUtilities/Cargo.toml
+            git rm .bootstrap/HorizonUtilities.tar.bz2
+            git add mods/HorizonUtilities
+            git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'feat: importer le code source HorizonUtilities'
+            git push origin HEAD:main
+          fi
+      - name: Install WebAssembly target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: horizon-utilities-import
+      - name: Install Horizon mod compiler
+        run: cargo install --git https://github.com/horizon-rust/horizon --branch main cargo-horizon-mod
+      - name: Check formatting and unit tests
+        run: |
+          cargo fmt --all -- --check
+          cargo test --workspace --lib
+      - name: Build and validate .hmod
+        id: pack
+        working-directory: mods/HorizonUtilities
+        run: |
+          set -euo pipefail
+          cargo horizon-mod build
+          hmod="$GITHUB_WORKSPACE/target/horizon-mod/horizon_utilities.hmod"
+          if [[ ! -f "$hmod" ]]; then
+            hmod=$(find "$GITHUB_WORKSPACE" -type f -path '*/target/horizon-mod/horizon_utilities.hmod' -print -quit)
+          fi
+          test -n "$hmod" && test -s "$hmod"
+          cargo horizon-mod check "$hmod"
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cp "$hmod" "$GITHUB_WORKSPACE/dist/HorizonUtilities.hmod"
+          echo "## HorizonUtilities.hmod" >> "$GITHUB_STEP_SUMMARY"
+          echo "Build, tests et vérification du paquet réalisés." >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish HorizonUtilities.hmod artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HorizonUtilities-hmod
+          path: dist/HorizonUtilities.hmod
+          if-no-files-found: error

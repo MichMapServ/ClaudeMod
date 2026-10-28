@@ -52,7 +52,7 @@ jobs:
           if [[ "$WANTED" == all ]]; then
             names=$(find mods -mindepth 2 -maxdepth 2 -name horizon-mod.toml -printf '%h\n' | sed 's|^mods/||' | sort)
           else
-            if [[ ! "$WANTED" =~ ^[a-z][a-z0-9-]*$ ]] || [[ ! -f "mods/$WANTED/horizon-mod.toml" ]]; then
+            if [[ ! "$WANTED" =~ ^[A-Za-z][A-Za-z0-9-]*$ ]] || [[ ! -f "mods/$WANTED/horizon-mod.toml" ]]; then
               echo "::error::Unknown mod: $WANTED"
               exit 1
             fi
@@ -92,6 +92,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: hmod-${{ matrix.mod }}
+      - name: Rust unit tests
+        working-directory: mods/${{ matrix.mod }}
+        run: |
+          if [[ -f Cargo.toml ]]; then
+            cargo test --lib
+          fi
       - name: Build, check and test
         id: build
         working-directory: mods/${{ matrix.mod }}
