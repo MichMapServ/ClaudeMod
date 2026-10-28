@@ -1,0 +1,9 @@
+id = "horizon_utilities"
+name = "Horizon Utilities"
+version = "0.1.0"
+description = "Nutrition HUD: exact hunger, held-food preview, settings page and key. Inventory, armor and pickup modules are blocked by the mod API (see README)."
+authors = ["ClaudeMod"]
+api = "0.1"
+side = "client"
+capabilities = ["game-read", "storage", "ui", "render", "input"]
+experimental = ["ui", "render", "input"]
