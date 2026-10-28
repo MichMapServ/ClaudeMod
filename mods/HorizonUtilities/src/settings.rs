@@ -86,7 +86,15 @@ mod tests {
 
     #[test]
     fn every_button_changes_something() {
-        for id in [TOGGLE, SHOW_BAR, SHOW_PREVIEW, SHOW_HELD, CORNER, SCALE, OPACITY] {
+        for id in [
+            TOGGLE,
+            SHOW_BAR,
+            SHOW_PREVIEW,
+            SHOW_HELD,
+            CORNER,
+            SCALE,
+            OPACITY,
+        ] {
             let mut config = Config::default();
             assert!(apply(&mut config, id), "{id}");
             assert_ne!(config, Config::default(), "{id}");

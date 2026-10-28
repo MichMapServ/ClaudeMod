@@ -96,6 +96,7 @@ jobs:
         working-directory: mods/${{ matrix.mod }}
         run: |
           if [[ -f Cargo.toml ]]; then
+            cargo fmt --check
             cargo test --lib
           fi
       - name: Build, check and test

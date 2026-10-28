@@ -83,7 +83,12 @@ mod tests {
 
     #[test]
     fn no_food_restores_more_than_a_full_bar() {
-        for id in ["golden_carrot", "rabbit_stew", "pumpkin_pie", "cooked_porkchop"] {
+        for id in [
+            "golden_carrot",
+            "rabbit_stew",
+            "pumpkin_pie",
+            "cooked_porkchop",
+        ] {
             let f = lookup(&format!("minecraft:{id}")).unwrap();
             assert!((1..=20).contains(&f.points));
         }

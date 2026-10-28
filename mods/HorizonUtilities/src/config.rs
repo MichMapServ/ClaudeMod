@@ -161,7 +161,11 @@ impl Config {
                 _ => {}
             }
         }
-        if version_ok { config } else { Config::default() }
+        if version_ok {
+            config
+        } else {
+            Config::default()
+        }
     }
 }
 
@@ -199,7 +203,10 @@ mod tests {
     fn garbage_gives_defaults() {
         assert_eq!(Config::decode(b"\xff\xfe"), Config::default());
         assert_eq!(Config::decode(b""), Config::default());
-        assert_eq!(Config::decode(&vec![b'a'; MAX_BYTES + 1]), Config::default());
+        assert_eq!(
+            Config::decode(&vec![b'a'; MAX_BYTES + 1]),
+            Config::default()
+        );
     }
 
     #[test]
