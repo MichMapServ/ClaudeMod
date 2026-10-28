@@ -84,8 +84,12 @@ pub fn build(
 
     let scale = cfg.scale_factor();
     let percent = cfg.opacity_percent();
-    let preview = held
-        .filter(|_| cfg.show_preview)
+    // The preview belongs to the hunger bar, not to the held-food details
+    // row. Turning off the icon/name must not silently disable the preview.
+    let preview = snap
+        .held
+        .as_ref()
+        .filter(|_| cfg.show_preview && cfg.show_bar)
         .map(|h| nutrition::preview(snap.food, h.points));
     let mut shapes: Vec<Shape> = Vec::new();
     let mut y = PAD;
@@ -219,6 +223,20 @@ mod tests {
         // background + title + 10 tracks + 7 fills + 2 gains + icon + label
         assert_eq!(panel.shapes.len(), 23);
         assert_eq!(count(&panel, |s| matches!(s, Shape::Item(_))), 1);
+    }
+
+    #[test]
+    fn preview_is_independent_of_held_food_row() {
+        let mut cfg = NutritionConfig::default();
+        cfg.show_held = false;
+        let panel = build(&cfg, &snap(14, Some("minecraft:apple")), &width_of).unwrap();
+        assert_eq!(count(&panel, |s| matches!(s, Shape::Item(_))), 0);
+        // 10 tracks, 7 filled hunger segments, 2 preview segments,
+        // 1 background, 1 title = 21.
+        assert_eq!(panel.shapes.len(), 21);
+        cfg.show_preview = false;
+        let without_preview = build(&cfg, &snap(14, Some("minecraft:apple")), &width_of).unwrap();
+        assert_eq!(without_preview.shapes.len(), 19);
     }
 
     #[test]

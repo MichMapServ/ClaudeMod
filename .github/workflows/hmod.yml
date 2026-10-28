@@ -58,6 +58,15 @@ jobs:
             fi
             names="$WANTED"
           fi
+          # Validate discovered paths too: a PR can introduce a folder whose
+          # name would be unsafe if interpolated into subsequent shell steps.
+          while IFS= read -r name; do
+            [[ -z "$name" ]] && continue
+            if [[ ! "$name" =~ ^[A-Za-z][A-Za-z0-9-]*$ ]]; then
+              echo "::error::Unsafe mod directory name: $name"
+              exit 1
+            fi
+          done <<< "$names"
           json=$(printf '%s\n' "$names" | jq -R -s -c 'split("\n") | map(select(length > 0))')
           echo "mods=$json" >> "$GITHUB_OUTPUT"
 
@@ -104,20 +113,37 @@ jobs:
         working-directory: mods/${{ matrix.mod }}
         run: |
           set -euo pipefail
+          id=$(sed -nE 's/^[[:space:]]*id[[:space:]]*=[[:space:]]*"([a-z0-9_]+)".*/\1/p' horizon-mod.toml | head -n 1)
+          if [[ ! "$id" =~ ^[a-z0-9_]{1,64}$ ]]; then
+            echo "::error::Invalid or missing horizon-mod.toml id"
+            exit 1
+          fi
           touch "$RUNNER_TEMP/hmod-stamp"
           cargo horizon-mod build
-          file=$(find "$GITHUB_WORKSPACE" -type f -path '*/target/horizon-mod/*.hmod' -newer "$RUNNER_TEMP/hmod-stamp" -print -quit)
-          test -n "$file" || { echo "::error::No .hmod was produced"; exit 1; }
+          # Check the artifact corresponding to THIS mod, never another
+          # newly-created .hmod elsewhere in the workspace.
+          file=""
+          for candidate in "$GITHUB_WORKSPACE/target/horizon-mod/$id.hmod" "$PWD/target/horizon-mod/$id.hmod"; do
+            if [[ -s "$candidate" && "$candidate" -nt "$RUNNER_TEMP/hmod-stamp" ]]; then
+              file="$candidate"
+              break
+            fi
+          done
+          test -n "$file" || { echo "::error::No freshly built $id.hmod was produced"; exit 1; }
           cargo horizon-mod check "$file"
           if compgen -G 'tests/*.toml' >/dev/null; then
             cargo horizon-mod test --hmod "$file"
           fi
           echo "file=$file" >> "$GITHUB_OUTPUT"
       - name: Prepare distribution
+        env:
+          MOD_NAME: ${{ matrix.mod }}
+          HMOD_FILE: ${{ steps.build.outputs.file }}
         run: |
+          set -euo pipefail
           mkdir -p dist
-          cp "${{ steps.build.outputs.file }}" "dist/${{ matrix.mod }}.hmod"
-          echo "### ${{ matrix.mod }} : OK" >> "$GITHUB_STEP_SUMMARY"
+          cp -- "$HMOD_FILE" "dist/$MOD_NAME.hmod"
+          echo "### $MOD_NAME : OK" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: hmod-${{ matrix.mod }}
