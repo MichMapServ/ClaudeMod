@@ -39,8 +39,12 @@ cargo horizon-mod build
 cargo horizon-mod check <chemin-affiché>.hmod
 ```
 
-Le workflow `.github/workflows/hmod.yml` compile, vérifie et publie l'artifact `hmod-horizon-utilities`.
+Le workflow `.github/workflows/hmod.yml` compile, vérifie et publie l'artifact `hmod-HorizonUtilities`.
 
 ## Validation
 
 Tests unitaires de la logique (config, table, aperçu, mise en page, réglages) ; **aucune vérification en jeu** n'a été faite : rendu, raccourci, page Options, persistance et changement de monde sont à valider avec `--dev-mod`.
+
+## Artifact GitHub Actions
+
+La compilation standard est assurée par [hmod.yml](../../.github/workflows/hmod.yml). Chaque push du code du mod lance automatiquement le workflow ; une exécution manuelle est possible depuis **Actions → hmod → Run workflow**, avec `mod=HorizonUtilities`. Une compilation réussie fournit l'artifact `hmod-HorizonUtilities` qui contient `HorizonUtilities.hmod`.
