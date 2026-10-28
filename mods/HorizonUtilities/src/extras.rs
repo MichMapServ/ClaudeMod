@@ -215,6 +215,8 @@ pub struct Runtime {
     notice: Option<(String, u64)>,
     lines: Vec<String>,
     map: Option<(bool, bool)>,
+    /// Needed to reposition the top HUD when the GUI is resized.
+    last_gui_width: Option<f32>,
 }
 
 impl Runtime {
@@ -252,6 +254,7 @@ impl Runtime {
         }
         self.last_held = None;
         self.notice = None;
+        self.last_gui_width = None;
     }
 
     pub fn refresh(
@@ -308,20 +311,27 @@ impl Runtime {
                 }
             }
         }
-        if lines == self.lines {
+        // Rendered HUD positions are screen-relative. An unchanged string is
+        // NOT an unchanged layout after a window/GUI-scale change.
+        let gui_width = if lines.is_empty() {
+            None
+        } else {
+            Some(render::gui_size().0)
+        };
+        if lines == self.lines && gui_width == self.last_gui_width {
             return;
         }
         if lines.is_empty() {
             render::set_hud(&[]);
         } else {
-            let (screen_w, _) = render::gui_size();
+            let screen_w = gui_width.unwrap_or(0.0);
             let width = lines
                 .iter()
                 .map(|s| render::text_width(s))
                 .fold(0.0_f32, f32::max)
                 + 12.0;
             let height = lines.len() as f32 * 11.0 + 8.0;
-            let left = ((screen_w - width) / 2.0).max(2.0);
+            let left = hud_left(screen_w, width);
             let top = 8.0;
             let mut shapes = vec![Shape::Fill(FillShape {
                 rect: Rect {
@@ -351,12 +361,30 @@ impl Runtime {
             render::set_hud(&shapes);
         }
         self.lines = lines;
+        self.last_gui_width = gui_width;
     }
+}
+
+/// If the panel is wider than the viewport it anchors to the left rather
+/// than moving to a negative coordinate; no screen-size data is persisted.
+fn hud_left(viewport: f32, panel: f32) -> f32 {
+    if !viewport.is_finite() || !panel.is_finite() {
+        return 2.0;
+    }
+    ((viewport - panel) / 2.0).max(2.0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hud_reflow_centers_after_resize() {
+        assert_eq!(hud_left(300.0, 100.0), 100.0);
+        assert_eq!(hud_left(500.0, 100.0), 200.0);
+        assert_eq!(hud_left(90.0, 100.0), 2.0);
+        assert_eq!(hud_left(f32::NAN, 100.0), 2.0);
+    }
 
     #[test]
     fn waypoints_roundtrip_and_select() {
