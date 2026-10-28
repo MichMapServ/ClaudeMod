@@ -1,0 +1,132 @@
+name: hmod
+
+on:
+  push:
+    branches: [main]
+    paths: ["mods/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "scripts/**", ".github/workflows/hmod.yml"]
+  pull_request:
+    paths: ["mods/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "scripts/**", ".github/workflows/hmod.yml"]
+  workflow_dispatch:
+    inputs:
+      mod:
+        description: "Mod directory under mods/ or all"
+        default: all
+        required: true
+      horizon_ref:
+        description: "Horizon branch for cargo-horizon-mod"
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hmod-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  HORIZON_GIT: ${{ vars.HORIZON_GIT || 'https://github.com/horizon-rust/horizon' }}
+  HORIZON_REF: ${{ inputs.horizon_ref || vars.HORIZON_REF || 'main' }}
+  CARGO_TERM_COLOR: always
+
+jobs:
+  scaffold:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m unittest discover -s scripts/tests -v
+
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      mods: ${{ steps.list.outputs.mods }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: list
+        env:
+          WANTED: ${{ inputs.mod || 'all' }}
+        run: |
+          set -euo pipefail
+          if [[ "$WANTED" == all ]]; then
+            names=$(find mods -mindepth 2 -maxdepth 2 -name horizon-mod.toml -printf '%h\n' | sed 's|^mods/||' | sort)
+          else
+            if [[ ! "$WANTED" =~ ^[a-z][a-z0-9-]*$ ]] || [[ ! -f "mods/$WANTED/horizon-mod.toml" ]]; then
+              echo "::error::Unknown mod: $WANTED"
+              exit 1
+            fi
+            names="$WANTED"
+          fi
+          json=$(printf '%s\n' "$names" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "mods=$json" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: discover
+    if: needs.discover.outputs.mods != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mod: ${{ fromJSON(needs.discover.outputs.mods) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust WebAssembly target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Resolve Horizon commit
+        id: horizon
+        run: |
+          set -euo pipefail
+          sha=$(git ls-remote "$HORIZON_GIT" "refs/heads/$HORIZON_REF" | head -n1 | cut -f1)
+          test -n "$sha" || { echo "::error::Horizon branch not found"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Cache Horizon CLI
+        id: tool
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-horizon-mod
+          key: cargo-horizon-mod-${{ steps.horizon.outputs.sha }}
+      - name: Install Horizon CLI
+        if: steps.tool.outputs.cache-hit != 'true'
+        run: cargo install --locked --git "$HORIZON_GIT" --branch "$HORIZON_REF" cargo-horizon-mod
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: hmod-${{ matrix.mod }}
+      - name: Build, check and test
+        id: build
+        working-directory: mods/${{ matrix.mod }}
+        run: |
+          set -euo pipefail
+          touch "$RUNNER_TEMP/hmod-stamp"
+          cargo horizon-mod build
+          file=$(find "$GITHUB_WORKSPACE" -type f -path '*/target/horizon-mod/*.hmod' -newer "$RUNNER_TEMP/hmod-stamp" -print -quit)
+          test -n "$file" || { echo "::error::No .hmod was produced"; exit 1; }
+          cargo horizon-mod check "$file"
+          if compgen -G 'tests/*.toml' >/dev/null; then
+            cargo horizon-mod test --hmod "$file"
+          fi
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+      - name: Prepare distribution
+        run: |
+          mkdir -p dist
+          cp "${{ steps.build.outputs.file }}" "dist/${{ matrix.mod }}.hmod"
+          echo "### ${{ matrix.mod }} : OK" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hmod-${{ matrix.mod }}
+          path: dist/${{ matrix.mod }}.hmod
+          if-no-files-found: error
+
+  result:
+    needs: [scaffold, discover, build]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate all checks
+        env:
+          SCAFFOLD: ${{ needs.scaffold.result }}
+          DISCOVER: ${{ needs.discover.result }}
+          BUILD: ${{ needs.build.result }}
+        run: |
+          echo "scaffold=$SCAFFOLD discover=$DISCOVER build=$BUILD"
+          [[ "$SCAFFOLD" == success && "$DISCOVER" == success && ( "$BUILD" == success || "$BUILD" == skipped ) ]]
