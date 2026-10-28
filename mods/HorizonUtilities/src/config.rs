@@ -109,23 +109,56 @@ impl NutritionConfig {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExtrasConfig {
+    pub enabled: bool,
+    pub performance: bool,
+    pub survival_alerts: bool,
+    pub held_changes: bool,
+    pub navigation: bool,
+    pub minimap: bool,
+    pub rotate_map: bool,
+}
+
+impl Default for ExtrasConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            performance: true,
+            survival_alerts: true,
+            held_changes: true,
+            navigation: true,
+            minimap: false,
+            rotate_map: false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Config {
     pub nutrition: NutritionConfig,
+    pub extras: ExtrasConfig,
 }
 
 impl Config {
     pub fn encode(&self) -> Vec<u8> {
         let n = &self.nutrition;
         format!(
-            "version={FORMAT_VERSION}\nnutrition.enabled={}\nnutrition.bar={}\nnutrition.preview={}\nnutrition.held={}\nnutrition.corner={}\nnutrition.scale={}\nnutrition.opacity={}\n",
+            "version={FORMAT_VERSION}\nnutrition.enabled={}\nnutrition.bar={}\nnutrition.preview={}\nnutrition.held={}\nnutrition.corner={}\nnutrition.scale={}\nnutrition.opacity={}\nextras.enabled={}\nextras.performance={}\nextras.survival_alerts={}\nextras.held_changes={}\nextras.navigation={}\nextras.minimap={}\nextras.rotate_map={}\n",
             n.enabled,
             n.show_bar,
             n.show_preview,
             n.show_held,
             n.corner.id(),
             n.scale,
-            n.opacity
+            n.opacity,
+            self.extras.enabled,
+            self.extras.performance,
+            self.extras.survival_alerts,
+            self.extras.held_changes,
+            self.extras.navigation,
+            self.extras.minimap,
+            self.extras.rotate_map
         )
         .into_bytes()
     }
@@ -158,6 +191,13 @@ impl Config {
                 }
                 "nutrition.scale" => set_index(&mut n.scale, value, SCALES.len()),
                 "nutrition.opacity" => set_index(&mut n.opacity, value, OPACITIES.len()),
+                "extras.enabled" => set_bool(&mut config.extras.enabled, value),
+                "extras.performance" => set_bool(&mut config.extras.performance, value),
+                "extras.survival_alerts" => set_bool(&mut config.extras.survival_alerts, value),
+                "extras.held_changes" => set_bool(&mut config.extras.held_changes, value),
+                "extras.navigation" => set_bool(&mut config.extras.navigation, value),
+                "extras.minimap" => set_bool(&mut config.extras.minimap, value),
+                "extras.rotate_map" => set_bool(&mut config.extras.rotate_map, value),
                 _ => {}
             }
         }
@@ -196,6 +236,8 @@ mod tests {
         config.nutrition.corner = Corner::TopLeft;
         config.nutrition.scale = 2;
         config.nutrition.opacity = 1;
+        config.extras.minimap = true;
+        config.extras.rotate_map = true;
         assert_eq!(Config::decode(&config.encode()), config);
     }
 
