@@ -15,6 +15,13 @@ pub const SHOW_HELD: u32 = 13;
 pub const CORNER: u32 = 14;
 pub const SCALE: u32 = 15;
 pub const OPACITY: u32 = 16;
+pub const EXTRAS: u32 = 30;
+pub const PERFORMANCE: u32 = 31;
+pub const SURVIVAL: u32 = 32;
+pub const HELD_CHANGES: u32 = 33;
+pub const NAVIGATION: u32 = 34;
+pub const MINIMAP: u32 = 35;
+pub const ROTATE_MAP: u32 = 36;
 pub const RESET: u32 = 99;
 
 /// Applies a click on button `id`; false for an id that is not a setting.
@@ -28,6 +35,13 @@ pub fn apply(config: &mut Config, id: u32) -> bool {
         CORNER => n.corner = n.corner.next(),
         SCALE => n.cycle_scale(),
         OPACITY => n.cycle_opacity(),
+        EXTRAS => config.extras.enabled = !config.extras.enabled,
+        PERFORMANCE => config.extras.performance = !config.extras.performance,
+        SURVIVAL => config.extras.survival_alerts = !config.extras.survival_alerts,
+        HELD_CHANGES => config.extras.held_changes = !config.extras.held_changes,
+        NAVIGATION => config.extras.navigation = !config.extras.navigation,
+        MINIMAP => config.extras.minimap = !config.extras.minimap,
+        ROTATE_MAP => config.extras.rotate_map = !config.extras.rotate_map,
         RESET => *config = Config::default(),
         _ => return false,
     }
@@ -70,6 +84,46 @@ pub fn widgets(config: &Config) -> Vec<Widget> {
             format!("Échelle de la barre : x{}", n.scale_factor()),
         ),
         button(OPACITY, format!("Opacité : {} %", n.opacity_percent())),
+        line(3, "Modules natifs (100 % hmod)", 0x66CCFF),
+        button(
+            EXTRAS,
+            format!("Modules actifs : {}", on_off(config.extras.enabled)),
+        ),
+        button(
+            PERFORMANCE,
+            format!("FPS / CPS : {}", on_off(config.extras.performance)),
+        ),
+        button(
+            SURVIVAL,
+            format!(
+                "Alertes faim et vie : {}",
+                on_off(config.extras.survival_alerts)
+            ),
+        ),
+        button(
+            HELD_CHANGES,
+            format!(
+                "Variations main (pas pickups) : {}",
+                on_off(config.extras.held_changes)
+            ),
+        ),
+        button(
+            NAVIGATION,
+            format!("Waypoints : {}", on_off(config.extras.navigation)),
+        ),
+        button(
+            MINIMAP,
+            format!("Mini-carte : {}", on_off(config.extras.minimap)),
+        ),
+        button(
+            ROTATE_MAP,
+            format!("Mini-carte orientée : {}", on_off(config.extras.rotate_map)),
+        ),
+        line(
+            4,
+            "Points : /utilities wp add NOM | list | select NOM | remove NOM",
+            0xAAAAAA,
+        ),
         button(RESET, "Réinitialiser les réglages".to_string()),
         line(2, "Indisponible (API Horizon 0.1) :", 0xFFAA55),
     ];
@@ -94,6 +148,13 @@ mod tests {
             CORNER,
             SCALE,
             OPACITY,
+            EXTRAS,
+            PERFORMANCE,
+            SURVIVAL,
+            HELD_CHANGES,
+            NAVIGATION,
+            MINIMAP,
+            ROTATE_MAP,
         ] {
             let mut config = Config::default();
             assert!(apply(&mut config, id), "{id}");
