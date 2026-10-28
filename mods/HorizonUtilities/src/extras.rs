@@ -157,7 +157,7 @@ impl Waypoints {
             .map(|p| {
                 format!(
                     "{}{} ({:.0}, {:.0}, {:.0}, {})",
-                    if self.active.as_deref() == Some(&p.name) {
+                    if self.active.as_deref() == Some(p.name.as_str()) {
                         "*"
                     } else {
                         ""

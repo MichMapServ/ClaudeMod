@@ -1,50 +1,51 @@
-# Horizon Utilities
+# Horizon Utilities 0.2 — Mod Horizon autonome
 
-Mod client Horizon (Rust → WebAssembly `.hmod`), API `0.1`, id `horizon_utilities`.
-Analysé contre `horizon-rust/horizon` au commit `f66f66c` (`crates/horizon-mod-sdk/wit/horizon.wit`, package `horizon:mods@0.1.0`).
+Le mod se compile en **un seul fichier .hmod**. Il utilise exclusivement les fonctions officielles du SDK Horizon, sans compagnon, API externe ni injection.
 
-## Ce qui est disponible
+## Fonctionnalités disponibles
 
-| Module | État | Détail |
-|---|---|---|
-| **Nutrition HUD** | ✅ implémenté | Faim exacte (`game::get-player().food`, 0–20), barre de 10 icônes, aperçu des points de l'aliment en main, nom/icône/points, avertissement de points perdus, note d'effet. |
-| Saturation | ❌ non exposée | Aucune API : **aucune valeur n'est affichée**. |
-| **Inventory Manager** | ❌ bloqué par l'API | Aucune lecture/déplacement d'emplacements (`input::held` = main principale seulement ; `recipes::give` = créatif seulement). Aucun bouton factice. |
-| **Armor HUD** | ❌ bloqué par l'API | `game::player` ne contient ni équipement ni durabilité. |
-| **Pickup Notifier** | ❌ bloqué par l'API | Aucun événement de ramassage. Une détection par variation de la main n'est pas fiable : non implémentée. |
+- **Nutrition HUD** : faim réelle 0–20, segments, aperçu de restauration avec les aliments vanilla connus, pertes de points potentielles, notes d'effets.
+- **Survie** : avertissements si la faim ou la vie sont au plus à 6/20.
+- **Performances** : FPS, 1% low, clics par seconde (attaque/utilisation).
+- **Navigation** : jusqu'à 8 waypoints sauvegardés, avec coordonnées, dimension, distance, cap relatif et dénivelé.
+- **Mini-carte** : mini-carte officielle du moteur, optionnelle, orientation configurable ; un seul mod à la fois peut l'afficher.
+- **Variations de la main** : différences de quantité du même stack, dans le même emplacement, affichées brièvement. **Ce ne sont pas des notifications fiables de ramassage**.
+- **Réglages** : Options > Mods > Horizon Utilities, raccourci N pour activer/désactiver le HUD nutrition, sauvegarde locale via l'API storage.
 
-Limite importante du Nutrition HUD : les points d'un aliment viennent d'une **table vanilla intégrée** (`src/food.rs`), car l'API n'expose pas les valeurs nutritionnelles. Un aliment absent de la table (mod, datapack) n'a pas d'aperçu. Le texte ne peut pas être mis à l'échelle par l'API : l'échelle agit sur la barre et l'icône.
+## Commandes
 
-## Capacités déclarées
+    /utilities status
+    /utilities nutrition on|off|toggle
+    /utilities extras on|off|toggle
+    /utilities wp add NOM
+    /utilities wp select NOM
+    /utilities wp remove NOM
+    /utilities wp list
+    /utilities wp off
+    /utilities wp clear
+    /utilities reset
 
-`game-read`, `storage`, `ui`, `render`, `input` ; `ui`, `render` et `input` sont expérimentales (`experimental = [...]`) et peuvent changer à toute version de Horizon.
+La commande wp add enregistre les coordonnées et la dimension courantes. Le nom doit contenir 1 à 24 caractères ASCII alphanumériques, tiret ou soulignement. Un waypoint dans une autre dimension ne prétend pas avoir un cap valable.
 
-## Utilisation
+## Limites impossibles à contourner dans le fichier .hmod actuel
 
-- **Page de réglages** : Options → Mods → Horizon Utilities (activer/désactiver chaque élément, coin, échelle, opacité, réinitialiser).
-- **Raccourci** : `N` (modifiable dans la page du mod) — afficher/masquer le HUD nutrition.
-- **Commande** : `/utilities [status | nutrition on|off|toggle | reset]`.
-- Réglages persistants (`storage`, clé `config.v1`, format versionné ; valeur illisible → défauts).
+Le SDK horizon:mods@0.1 ne donne PAS accès à :
+- **Inventory Manager automatique** : emplacements, conteneurs, déplacement et tri des objets.
+- **Armor HUD réel** : équipement porté, durabilité et composants des pièces d'armure.
+- **Pickup Notifier fiable** : événement de ramassage et provenance exacte des objets.
+- **Saturation exacte** : propriété de l'état de nutrition du joueur.
 
-## Structure
+Les informations existent dans le moteur et certaines dans sa commande de contrôle locale, mais elles ne sont pas exportées à la sandbox WebAssembly. Ces modules requièrent une évolution du moteur Horizon. Ils ne sont pas déclarés fonctionnels par ce mod.
 
-`config.rs` (réglages, sans SDK) · `food.rs` (table) · `nutrition.rs` (logique pure) · `hud.rs` (formes `render`) · `settings.rs` (page `ui`) · `unavailable.rs` (limites) · `lib.rs` (hooks).
+## CI et compilation
 
-## Compilation
+Depuis mods/HorizonUtilities :
 
-```sh
-cd mods/HorizonUtilities
-cargo fmt --check && cargo test --lib
-cargo horizon-mod build
-cargo horizon-mod check <chemin-affiché>.hmod
-```
+    cargo fmt --check
+    cargo test --lib
+    cargo horizon-mod build
+    cargo horizon-mod check CHEMIN_DU_HMOD
 
-Le workflow `.github/workflows/hmod.yml` compile, vérifie et publie l'artifact `hmod-HorizonUtilities`.
+GitHub Actions (.github/workflows/hmod.yml) vérifie les tests, compile le paquet et fournit l'artifact hmod-HorizonUtilities, contenant HorizonUtilities.hmod.
 
-## Validation
-
-Tests unitaires de la logique (config, table, aperçu, mise en page, réglages) ; **aucune vérification en jeu** n'a été faite : rendu, raccourci, page Options, persistance et changement de monde sont à valider avec `--dev-mod`.
-
-## Artifact GitHub Actions
-
-La compilation standard est assurée par [hmod.yml](../../.github/workflows/hmod.yml). Chaque push du code du mod lance automatiquement le workflow ; une exécution manuelle est possible depuis **Actions → hmod → Run workflow**, avec `mod=HorizonUtilities`. Une compilation réussie fournit l'artifact `hmod-HorizonUtilities` qui contient `HorizonUtilities.hmod`.
+Les tests de logique et la compilation ne remplacent pas un test visuel dans le jeu. Le SDK ui, render et input est expérimental et peut changer d'une version de Horizon à l'autre.
