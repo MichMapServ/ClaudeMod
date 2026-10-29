@@ -104,3 +104,42 @@ jobs:
         run: |
           echo "Package=$PACKAGE Native=$NATIVE"
           test "$PACKAGE" = success && test "$NATIVE" = success
+
+  publish:
+    name: Publish verified native bundle to dist
+    needs: [quality-gate]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: hnmod-HorizonUtilitiesNative
+          path: staging
+      - name: Verify SHA and publish durable bundle
+        run: |
+          set -euo pipefail
+          (cd staging && sha256sum --check *.hnmod.sha256)
+          artifact=$(find staging -maxdepth 1 -type f -name 'HorizonUtilitiesNative-*.hnmod' -print -quit)
+          test -s "$artifact"
+          mkdir -p dist
+          cp -- "$artifact" "dist/$(basename "$artifact")"
+          cp -- "$artifact.sha256" "dist/$(basename "$artifact").sha256"
+          cp -- "$artifact" dist/HorizonUtilitiesNative.hnmod
+          (cd dist && sha256sum HorizonUtilitiesNative.hnmod > HorizonUtilitiesNative.hnmod.sha256)
+          git add -f dist/*.hnmod dist/*.hnmod.sha256
+          if git diff --cached --quiet; then
+            echo 'Native release unchanged' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'build(native): publish verified HorizonUtilitiesNative hnmod'
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git rebase origin/main
+            if git push origin HEAD:main; then exit 0; fi
+          done
+          exit 1
