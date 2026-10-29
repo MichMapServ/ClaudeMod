@@ -24,6 +24,7 @@ thread_local! {
 const OPTIONS: [(&str, &str, bool); 9] = [
     ("enabled", "HUD principal", true),
     ("nutrition", "Faim et saturation", true),
+    ("alerts", "Alertes de survie", true),
     ("armor", "Armure et durabilite", true),
     ("pickup", "Ramassages confirmes", true),
     ("performance", "FPS et CPS", true),
@@ -42,6 +43,26 @@ fn option(game: &Game<'_>, name: &str, fallback: bool) -> bool {
 fn active(game: &Game<'_>, key: &str, fallback: bool) -> bool {
     game.native_on(ID) && option(game, "enabled", true) && option(game, key, fallback)
 }
+/// Native settings return no status; read back to avoid false confirmations.
+fn persist(game: &Game<'_>, key: &str, value: &str) -> Result<(), String> {
+    game.native_set_setting(ID, key, value);
+    if game.native_setting(ID, key).as_deref() == Some(value) {
+        Ok(())
+    } else {
+        Err(format!("Enregistrement impossible pour {key}"))
+    }
+}
+fn relative_direction(yaw: f32, dx: f64, dz: f64) -> &'static str {
+    if !yaw.is_finite() || !dx.is_finite() || !dz.is_finite() {
+        return "cap inconnu";
+    }
+    if dx.abs() + dz.abs() < 0.5 { return "sur place"; }
+    let target = (-dx).atan2(dz).to_degrees();
+    let delta = (target - f64::from(yaw) + 540.0).rem_euclid(360.0) - 180.0;
+    if delta.abs() <= 35.0 { "devant" }
+    else if delta.abs() >= 145.0 { "derriere" }
+    else if delta < 0.0 { "droite" } else { "gauche" }
+}
 pub(super) fn settings(game: &Game<'_>) -> Vec<String> {
     OPTIONS.iter().map(|(key, title, fallback)| {
         format!("{title}  [{}]", if option(game, key, *fallback) {"ON"} else {"OFF"})
@@ -50,7 +71,9 @@ pub(super) fn settings(game: &Game<'_>) -> Vec<String> {
 pub(super) fn settings_click(game: &mut Game<'_>, index: usize) {
     if let Some(&(key, _, fallback)) = OPTIONS.get(index) {
         let next = !option(game, key, fallback);
-        game.native_set_setting(ID, key, if next {"true"} else {"false"});
+        if let Err(error) = persist(game, key, if next {"true"} else {"false"}) {
+            game.native_chat(&error);
+        }
     }
 }
 pub(super) fn key(game: &mut Game<'_>, key: &str) {
@@ -120,8 +143,7 @@ fn save_points(game: &Game<'_>, points: &[Waypoint]) -> Result<(), String> {
         .map(|p| format!("{}|{}|{}|{:.3}|{:.3}|{:.3}",p.profile,p.name,p.dimension,p.x,p.y,p.z))
         .collect::<Vec<_>>().join("\n");
     if raw.len() > 16384 { return Err("Stockage plein".into()); }
-    game.native_set_setting(ID, STORAGE, &raw);
-    Ok(())
+    persist(game, STORAGE, &raw)
 }
 fn profile(game: &Game<'_>) -> Option<String> {
     game.native_setting(ID, ACTIVE_PROFILE).filter(|p| valid_ident(p))
@@ -154,7 +176,11 @@ pub(super) fn draw(game: &mut Game<'_>, batch: &mut HudBatch, corners: &mut Corn
             let f=p.health.food.food;
             let s=p.health.food.saturation;
             vital.push((format!("NUTRITION  {f}/20  SAT {s:.1}"),0xFF6AE2D2));
-            if f<=6 || p.health.health()<=6.0 {
+            let exhaustion = p.health.food.exhaustion;
+            if !compact && exhaustion.is_finite() {
+                vital.push((format!("Epuisement local : {exhaustion:.1}"),0xFF9DB7D4));
+            }
+            if option(game,"alerts",true) && (f<=6 || p.health.health()<=6.0) {
                 vital.push((format!("! Survie  vie {:.1}  faim {f}",p.health.health()),0xFFFF8F8F));
             }
             if !compact {
@@ -194,7 +220,7 @@ pub(super) fn draw(game: &mut Game<'_>, batch: &mut HudBatch, corners: &mut Corn
         if let (Some(p),Some(w))=(game.native_player(),current_point(game)) {
             if p.dimension==w.dimension {
                 let dx=w.x-p.x;let dy=w.y-p.y;let dz=w.z-p.z;
-                extra.push((format!("{}: {:.0}m  Y {dy:+.0}",w.name,(dx*dx+dy*dy+dz*dz).sqrt()),0xFFFFD88A));
+                extra.push((format!("{}: {:.0}m  {}  Y {dy:+.0}",w.name,(dx*dx+dy*dy+dz*dz).sqrt(),relative_direction(p.yaw,dx,dz)),0xFFFFD88A));
             } else {extra.push((format!("{}: autre dimension",w.name),0xFFFFD88A));}
         }
     }
@@ -327,4 +353,12 @@ mod tests {
     #[test] fn identifiers_are_bounded(){assert!(valid_ident("base_1"));assert!(!valid_ident("../x"));assert!(!valid_ident(""));assert!(!valid_ident(&"x".repeat(25)));}
     #[test] fn coordinates_are_finite(){assert!(!finite_pos(f64::NAN,0.0,0.0));assert!(!finite_pos(0.0,f64::INFINITY,0.0));assert!(finite_pos(10.0,64.0,-10.0));}
     #[test] fn corrupted_waypoints_are_ignored(){assert!(parse_point("a|b|minecraft:overworld|NaN|4|5").is_none());assert!(parse_point("a|b|minecraft:overworld|1|2|3").is_some());}
+    #[test] fn relative_direction_matches_yaw(){
+        assert_eq!(relative_direction(0.0,0.0,10.0),"devant");
+        assert_eq!(relative_direction(0.0,10.0,0.0),"droite");
+        assert_eq!(relative_direction(0.0,-10.0,0.0),"gauche");
+        assert_eq!(relative_direction(-90.0,10.0,0.0),"devant");
+        assert_eq!(relative_direction(0.0,0.0,-10.0),"derriere");
+        assert_eq!(relative_direction(f32::NAN,1.0,0.0),"cap inconnu");
+    }
 }
