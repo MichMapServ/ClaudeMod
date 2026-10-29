@@ -82,7 +82,15 @@ fn roman(level: i32) -> String {
     if (1..=10).contains(&level) {R[(level-1) as usize].into()} else {level.to_string()}
 }
 fn accent(icon: &EffectIcon) -> u32 {
-    if icon.beneficial {0xFF58D6B1} else {0xFFF28A81}
+    // Use the *actual effect color* from Horizon, brightened for contrast on
+    // dark cards. Regen, speed, poison, fire resistance etc stay distinct.
+    let color = icon.color as u32 & 0x00FF_FFFF;
+    if color == 0 { return if icon.beneficial {0xFF58D6B1} else {0xFFF28A81}; }
+    let brighten = |n: u32| (n * 3 / 4 + 58).min(255);
+    let red = brighten((color >> 16) & 255);
+    let green = brighten((color >> 8) & 255);
+    let blue = brighten(color & 255);
+    0xFF00_0000 | (red << 16) | (green << 8) | blue
 }
 fn clamp_ratio(duration: i32, max: i32) -> f32 {
     if duration == -1 {return 1.0;}
@@ -269,6 +277,15 @@ mod tests {
         assert_eq!(format_duration(20,20.0),"00:01");
         assert_eq!(format_duration(1220,20.0),"01:01");
         assert_eq!(format_duration(72000,20.0),"1:00:00");
+    }
+    #[test] fn effect_palette_is_distinct_and_opaque(){
+        let mut a = EffectIcon { id: "speed".into(), beneficial: true, color: 0x3366CC, ambient: false, duration: 200, show_icon: true };
+        let blue = accent(&a);
+        a.color = 0xCC3333;
+        let red = accent(&a);
+        assert_ne!(blue,red);
+        assert_eq!(blue >> 24,0xFF);
+        assert_eq!(red >> 24,0xFF);
     }
     #[test] fn roman_levels_are_readable(){
         assert_eq!(roman(2),"II");assert_eq!(roman(10),"X");assert_eq!(roman(11),"11");
