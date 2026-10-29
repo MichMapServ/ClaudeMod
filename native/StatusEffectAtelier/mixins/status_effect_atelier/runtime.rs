@@ -207,7 +207,8 @@ fn vanilla_hud(game:&Game<'_>,batch:&mut HudBatch){
     let calls=hud_overlays::effects(batch.width as i32,false,&icons);
     hud_layout::paint(batch,&game.gui.atlas,&calls);
 }
-pub(super) fn hud(game:&Game<'_>,batch:&mut HudBatch,inventory_effects:bool) {
+pub(super) fn hud(game:&Game<'_>,batch:&mut HudBatch) {
+    let inventory_effects = matches!(game.screen, Screen::Inventory | Screen::Creative);
     if game.potions.effects.list.is_empty(){reset_on_empty();return;}
     if !enabled(game) {
         if !inventory_effects {vanilla_hud(game,batch);}
@@ -250,7 +251,7 @@ pub(super) fn inventory(game:&Game<'_>,batch:&mut HudBatch,origin:(f32,f32),imag
     if !on(game,"inventory",true){return;}
     let x=origin.0+image_width as f32+4.0;
     let avail=batch.width as f32-x-5.0;
-    if avail<32.0{return;}
+    if avail<32.0 { hud(game,batch); return; }
     let w=match value(game,"width","medium").as_str(){
         "small"=>138.0,"large"=>202.0,_=>170.0
     }.min(avail);
