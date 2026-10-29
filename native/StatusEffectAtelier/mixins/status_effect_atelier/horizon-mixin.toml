@@ -48,7 +48,8 @@ bindings = [
 # Both restore the vanilla painter whenever this mod is disabled.
 [[injection]]
 id = "hud-effect-cards"
-kind = "OVERWRITE"
+kind = "HEAD"
+cancellable = true
 target = "horizon_client::game::potions::Game<'_>::draw_effect_icons"
 helper = "hud.rs"
 bindings = [
@@ -58,7 +59,8 @@ bindings = [
 
 [[injection]]
 id = "inventory-effect-cards"
-kind = "OVERWRITE"
+kind = "HEAD"
+cancellable = true
 target = "horizon_client::game::potions::Game<'_>::draw_inventory_effects"
 helper = "inventory.rs"
 bindings = [
