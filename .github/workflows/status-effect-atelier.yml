@@ -1,0 +1,95 @@
+name: status-effect-atelier
+on:
+  pull_request:
+    paths: ["native/StatusEffectAtelier/**", "scripts/build_status_atelier.py", "scripts/tests/test_status_atelier.py", ".github/workflows/status-effect-atelier.yml"]
+  push:
+    branches: [main]
+    paths: ["native/StatusEffectAtelier/**", "scripts/build_status_atelier.py", "scripts/tests/test_status_atelier.py", ".github/workflows/status-effect-atelier.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: status-effect-atelier-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate and package
+        run: |
+          set -euo pipefail
+          python -m unittest discover -s scripts/tests -p 'test_status_atelier.py' -v
+          python scripts/build_status_atelier.py pack
+          python scripts/build_status_atelier.py verify
+          (cd dist && sha256sum -c StatusEffectAtelier.hnmod.sha256)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StatusEffectAtelier-hnmod
+          path: |
+            dist/StatusEffectAtelier.hnmod
+            dist/StatusEffectAtelier.hnmod.sha256
+          if-no-files-found: error
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      RUSTUP_TOOLCHAIN: "1.99.1"
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+      - name: Official pinned Rust toolchain and system libraries
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev pkg-config
+      - name: Read pinned commits
+        id: refs
+        run: |
+          python3 - <<'PY'
+          import json,os
+          c=json.load(open("native/StatusEffectAtelier/compatibility.json"))
+          with open(os.environ["GITHUB_OUTPUT"],"a") as f:
+              f.write("HORIZON="+c["horizon_revision"]+"\n")
+              f.write("MIXINS="+c["horizon_mixins_revision"]+"\n")
+          PY
+      - name: Checkout Horizon at exact tested revision
+        env:
+          REV: ${{ steps.refs.outputs.HORIZON }}
+        run: |
+          set -euo pipefail
+          git init "$RUNNER_TEMP/horizon"
+          git -C "$RUNNER_TEMP/horizon" remote add origin https://github.com/horizon-rust/horizon.git
+          git -C "$RUNNER_TEMP/horizon" fetch --depth 1 origin "$REV"
+          git -C "$RUNNER_TEMP/horizon" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/horizon" rev-parse HEAD)" = "$REV"
+          rm -rf "$RUNNER_TEMP/horizon/.git"
+          find "$RUNNER_TEMP/horizon" -type l -delete
+          printf '%s' "$REV" > "$RUNNER_TEMP/horizon/.horizon-revision"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: horizon-status-atelier-v1
+      - name: Install pinned Horizon Mixins CLI
+        env:
+          REV: ${{ steps.refs.outputs.MIXINS }}
+        run: cargo install --locked --git https://github.com/horizon-rust/horizon-mixins --rev "$REV" horizon-mixins-cli
+      - name: Inject the native mod into Horizon
+        run: horizon-mixins apply --workspace "$RUNNER_TEMP/horizon" --mods "$GITHUB_WORKSPACE/native/StatusEffectAtelier/mixins" --out "$RUNNER_TEMP/staged-horizon"
+      - name: Compile Horizon with Status Effect Atelier
+        working-directory: ${{ runner.temp }}/staged-horizon
+        run: cargo check --locked --no-default-features -p horizon-client --bin horizon-client
+      - name: Run injected Rust tests
+        working-directory: ${{ runner.temp }}/staged-horizon
+        run: cargo test --locked --no-default-features -p horizon-client --bin horizon-client status_effect_atelier::tests
+  gate:
+    if: always()
+    needs: [package, native]
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          PACKAGE: ${{ needs.package.result }}
+          NATIVE: ${{ needs.native.result }}
+        run: test "$PACKAGE" = success && test "$NATIVE" = success
