@@ -8,11 +8,16 @@ class TestHnmod(unittest.TestCase):
         info,entries=mod.entries()
         self.assertEqual(info["id"],"horizon_utilities")
         self.assertEqual(len(info["horizon"]),40)
+        self.assertEqual(info["hooks"],2)
         self.assertGreaterEqual(len(entries),10)
     def test_determinism_and_integrity(self):
         with tempfile.TemporaryDirectory() as d:
             a,b=Path(d)/"one.hnmod",Path(d)/"two.hnmod"
             self.assertEqual(mod.pack(a),mod.pack(b))
             self.assertEqual(a.read_bytes(),b.read_bytes())
+            with zipfile.ZipFile(a) as z:
+                import json
+                manifest=json.loads(z.read("horizon-native.json"))
+                self.assertEqual(manifest["hooks"],2)
             with zipfile.ZipFile(a,"a") as z: z.writestr("../unexpected.rs","evil")
             with self.assertRaises(AssertionError):mod.check(a)
