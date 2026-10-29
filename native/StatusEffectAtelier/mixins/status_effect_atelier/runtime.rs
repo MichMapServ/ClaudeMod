@@ -1,5 +1,5 @@
-//! Status Effect Atelier: original card design with the game's own mob-effect
-//! atlas sprites (mob_effect/<id>). No Fabric/Cloth Config dependencies.
+// Status Effect Atelier: original card design with the game's own mob-effect
+// atlas sprites (mob_effect/<id>). No Fabric/Cloth Config dependencies.
 use super::{Game, Screen};
 use horizon_client::{
     effects::EffectInstance,
