@@ -47,8 +47,21 @@ class ArchiveTests(unittest.TestCase):
         self.assertNotIn('find "$GITHUB_WORKSPACE" -type f -path', yml)
 
     def test_no_compiled_binaries_in_source_archive(self):
-        binaries = list(ROOT.rglob('*.wasm')) + list(ROOT.rglob('*.hmod'))
+        # The project *publishes* verified binaries under dist/. They must
+        # never be committed inside editable mod source directories.
+        roots = [ROOT / 'mods', ROOT / 'experimental', ROOT / 'native']
+        binaries = [p for folder in roots for pattern in ('*.wasm', '*.hmod', '*.hnmod')
+                    for p in folder.rglob(pattern)]
         self.assertEqual(binaries, [])
+
+    def test_published_hmod_checksum_if_present(self):
+        import hashlib
+        archive = ROOT / 'dist' / 'HorizonUtilities.hmod'
+        if archive.exists():
+            checksum = archive.with_name(archive.name + '.sha256')
+            self.assertTrue(checksum.is_file(), 'published binary lacks checksum')
+            expected = checksum.read_text().split()[0]
+            self.assertEqual(hashlib.sha256(archive.read_bytes()).hexdigest(), expected)
 
 if __name__ == '__main__':
     unittest.main()

@@ -1,0 +1,145 @@
+name: hnmod-native
+on:
+  pull_request:
+    paths: ["native/**", "scripts/build_hnmod.py", "scripts/tests/test_hnmod.py", ".github/workflows/hnmod.yml"]
+  push:
+    branches: [main]
+    paths: ["native/**", "scripts/build_hnmod.py", "scripts/tests/test_hnmod.py", ".github/workflows/hnmod.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: hnmod-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  package:
+    name: Package and verify checksum
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Security tests and reproducible archive
+        run: |
+          set -euo pipefail
+          python -m unittest discover -s scripts/tests -p 'test_hnmod.py' -v
+          python scripts/build_hnmod.py pack
+          python scripts/build_hnmod.py verify
+          (cd dist && sha256sum --check *.hnmod.sha256)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hnmod-HorizonUtilitiesNative
+          path: |
+            dist/*.hnmod
+            dist/*.hnmod.sha256
+          if-no-files-found: error
+          retention-days: 90
+  native-compile:
+    name: Apply mixins and compile pinned Horizon
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      RUSTUP_TOOLCHAIN: "1.99.1"
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup toolchain and native dependencies
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev pkg-config
+      - name: Read immutable source revisions
+        id: refs
+        run: |
+          python3 - <<'PY'
+          import json,os
+          c=json.load(open("native/HorizonUtilities/compatibility.json"))
+          with open(os.environ["GITHUB_OUTPUT"],"a") as out:
+            out.write("HORIZON="+c["horizon_revision"]+"\n")
+            out.write("MIXINS="+c["horizon_mixins_revision"]+"\n")
+          PY
+      - name: Checkout pinned Horizon source
+        env:
+          HORIZON_REV: ${{ steps.refs.outputs.HORIZON }}
+        run: |
+          set -euo pipefail
+          git init "$RUNNER_TEMP/horizon"
+          git -C "$RUNNER_TEMP/horizon" remote add origin https://github.com/horizon-rust/horizon.git
+          git -C "$RUNNER_TEMP/horizon" fetch --depth 1 origin "$HORIZON_REV"
+          git -C "$RUNNER_TEMP/horizon" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/horizon" rev-parse HEAD)" = "$HORIZON_REV"
+          # The mixins staging security check deliberately rejects symbolic links.
+          # A source archive does not include Git metadata; mirror that behavior.
+          rm -rf "$RUNNER_TEMP/horizon/.git"
+          find "$RUNNER_TEMP/horizon" -type l -print -delete
+          # horizon-mixins validates the exact source revision from this marker.
+          printf '%s' "$HORIZON_REV" > "$RUNNER_TEMP/horizon/.horizon-revision"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: horizonutilities-native-1.99.1
+      - name: Install pinned mixins CLI
+        env:
+          MIXINS_REV: ${{ steps.refs.outputs.MIXINS }}
+        run: cargo install --locked --git https://github.com/horizon-rust/horizon-mixins --rev "$MIXINS_REV" horizon-mixins-cli
+      - name: Apply mixins to the client
+        run: |
+          horizon-mixins apply --workspace "$RUNNER_TEMP/horizon" --mods "$GITHUB_WORKSPACE/native/HorizonUtilities/mixins" --out "$RUNNER_TEMP/staged-horizon"
+      - name: Check native client with injected mod
+        working-directory: ${{ runner.temp }}/staged-horizon
+        run: cargo check --locked --no-default-features -p horizon-client --bin horizon-client
+      - name: Run embedded mod tests
+        working-directory: ${{ runner.temp }}/staged-horizon
+        run: cargo test --locked --no-default-features -p horizon-client --bin horizon-client horizon_utilities_native::tests
+  quality-gate:
+    name: Require both checks
+    if: always()
+    needs: [package, native-compile]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify statuses
+        env:
+          PACKAGE: ${{ needs.package.result }}
+          NATIVE: ${{ needs.native-compile.result }}
+        run: |
+          echo "Package=$PACKAGE Native=$NATIVE"
+          test "$PACKAGE" = success && test "$NATIVE" = success
+
+  publish:
+    name: Publish verified native bundle to dist
+    needs: [quality-gate]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: hnmod-HorizonUtilitiesNative
+          path: staging
+      - name: Verify SHA and publish durable bundle
+        run: |
+          set -euo pipefail
+          (cd staging && sha256sum --check *.hnmod.sha256)
+          artifact=$(find staging -maxdepth 1 -type f -name 'HorizonUtilitiesNative-*.hnmod' -print -quit)
+          test -s "$artifact"
+          mkdir -p dist
+          cp -- "$artifact" "dist/$(basename "$artifact")"
+          cp -- "$artifact.sha256" "dist/$(basename "$artifact").sha256"
+          cp -- "$artifact" dist/HorizonUtilitiesNative.hnmod
+          (cd dist && sha256sum HorizonUtilitiesNative.hnmod > HorizonUtilitiesNative.hnmod.sha256)
+          git add -f dist/*.hnmod dist/*.hnmod.sha256
+          if git diff --cached --quiet; then
+            echo 'Native release unchanged' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'build(native): publish verified HorizonUtilitiesNative hnmod'
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git rebase origin/main
+            if git push origin HEAD:main; then exit 0; fi
+          done
+          exit 1
