@@ -12,6 +12,9 @@ const MAX_BYTES: usize = 4096;
 pub const SCALES: [f32; 4] = [1.0, 1.5, 2.0, 3.0];
 /// Opacity percentages the settings page cycles through.
 pub const OPACITIES: [u8; 4] = [25, 50, 75, 100];
+/// Simultaneous pickup notifications, and how long each stays, in seconds.
+pub const MAX_ENTRIES: [usize; 4] = [3, 5, 8, 10];
+pub const SECONDS: [f32; 4] = [2.0, 3.0, 5.0, 8.0];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Corner {
@@ -110,6 +113,75 @@ impl NutritionConfig {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct ArmorConfig {
+    pub enabled: bool,
+    pub show_percent: bool,
+    pub corner: Corner,
+    /// Index into [`SCALES`].
+    pub scale: usize,
+}
+
+impl Default for ArmorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            show_percent: true,
+            corner: Corner::TopLeft,
+            scale: 0,
+        }
+    }
+}
+
+impl ArmorConfig {
+    pub fn scale_factor(&self) -> f32 {
+        SCALES[self.scale.min(SCALES.len() - 1)]
+    }
+
+    pub fn cycle_scale(&mut self) {
+        self.scale = (self.scale + 1) % SCALES.len();
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PickupConfig {
+    pub enabled: bool,
+    pub corner: Corner,
+    /// Index into [`MAX_ENTRIES`].
+    pub max: usize,
+    /// Index into [`SECONDS`].
+    pub seconds: usize,
+}
+
+impl Default for PickupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            corner: Corner::TopRight,
+            max: 1,
+            seconds: 1,
+        }
+    }
+}
+
+impl PickupConfig {
+    pub fn max_entries(&self) -> usize {
+        MAX_ENTRIES[self.max.min(MAX_ENTRIES.len() - 1)]
+    }
+
+    pub fn lifetime(&self) -> f32 {
+        SECONDS[self.seconds.min(SECONDS.len() - 1)]
+    }
+
+    pub fn cycle_max(&mut self) {
+        self.max = (self.max + 1) % MAX_ENTRIES.len();
+    }
+
+    pub fn cycle_seconds(&mut self) {
+        self.seconds = (self.seconds + 1) % SECONDS.len();
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct ExtrasConfig {
     pub enabled: bool,
     pub performance: bool,
@@ -138,29 +210,41 @@ impl Default for ExtrasConfig {
 pub struct Config {
     pub nutrition: NutritionConfig,
     pub extras: ExtrasConfig,
+    pub armor: ArmorConfig,
+    pub pickup: PickupConfig,
 }
 
 impl Config {
     pub fn encode(&self) -> Vec<u8> {
-        let n = &self.nutrition;
-        format!(
-            "version={FORMAT_VERSION}\nnutrition.enabled={}\nnutrition.bar={}\nnutrition.preview={}\nnutrition.held={}\nnutrition.corner={}\nnutrition.scale={}\nnutrition.opacity={}\nextras.enabled={}\nextras.performance={}\nextras.survival_alerts={}\nextras.held_changes={}\nextras.navigation={}\nextras.minimap={}\nextras.rotate_map={}\n",
-            n.enabled,
-            n.show_bar,
-            n.show_preview,
-            n.show_held,
-            n.corner.id(),
-            n.scale,
-            n.opacity,
-            self.extras.enabled,
-            self.extras.performance,
-            self.extras.survival_alerts,
-            self.extras.held_changes,
-            self.extras.navigation,
-            self.extras.minimap,
-            self.extras.rotate_map
-        )
-        .into_bytes()
+        let (n, a, p) = (&self.nutrition, &self.armor, &self.pickup);
+        let lines = [
+            format!("version={FORMAT_VERSION}"),
+            format!("nutrition.enabled={}", n.enabled),
+            format!("nutrition.bar={}", n.show_bar),
+            format!("nutrition.preview={}", n.show_preview),
+            format!("nutrition.held={}", n.show_held),
+            format!("nutrition.corner={}", n.corner.id()),
+            format!("nutrition.scale={}", n.scale),
+            format!("nutrition.opacity={}", n.opacity),
+            format!("armor.enabled={}", a.enabled),
+            format!("armor.percent={}", a.show_percent),
+            format!("armor.corner={}", a.corner.id()),
+            format!("armor.scale={}", a.scale),
+            format!("pickup.enabled={}", p.enabled),
+            format!("pickup.corner={}", p.corner.id()),
+            format!("pickup.max={}", p.max),
+            format!("pickup.seconds={}", p.seconds),
+            format!("extras.enabled={}", self.extras.enabled),
+            format!("extras.performance={}", self.extras.performance),
+            format!("extras.survival_alerts={}", self.extras.survival_alerts),
+            format!("extras.held_changes={}", self.extras.held_changes),
+            format!("extras.navigation={}", self.extras.navigation),
+            format!("extras.minimap={}", self.extras.minimap),
+            format!("extras.rotate_map={}", self.extras.rotate_map),
+        ];
+        let mut text = lines.join("\n");
+        text.push('\n');
+        text.into_bytes()
     }
 
     pub fn decode(bytes: &[u8]) -> Config {
@@ -177,20 +261,25 @@ impl Config {
                 continue;
             };
             let (key, value) = (key.trim(), value.trim());
-            let n = &mut config.nutrition;
             match key {
                 "version" => version_ok = value.parse::<u32>().ok() == Some(FORMAT_VERSION),
-                "nutrition.enabled" => set_bool(&mut n.enabled, value),
-                "nutrition.bar" => set_bool(&mut n.show_bar, value),
-                "nutrition.preview" => set_bool(&mut n.show_preview, value),
-                "nutrition.held" => set_bool(&mut n.show_held, value),
-                "nutrition.corner" => {
-                    if let Some(c) = Corner::from_id(value) {
-                        n.corner = c;
-                    }
+                "nutrition.enabled" => set_bool(&mut config.nutrition.enabled, value),
+                "nutrition.bar" => set_bool(&mut config.nutrition.show_bar, value),
+                "nutrition.preview" => set_bool(&mut config.nutrition.show_preview, value),
+                "nutrition.held" => set_bool(&mut config.nutrition.show_held, value),
+                "nutrition.corner" => set_corner(&mut config.nutrition.corner, value),
+                "nutrition.scale" => set_index(&mut config.nutrition.scale, value, SCALES.len()),
+                "nutrition.opacity" => {
+                    set_index(&mut config.nutrition.opacity, value, OPACITIES.len())
                 }
-                "nutrition.scale" => set_index(&mut n.scale, value, SCALES.len()),
-                "nutrition.opacity" => set_index(&mut n.opacity, value, OPACITIES.len()),
+                "armor.enabled" => set_bool(&mut config.armor.enabled, value),
+                "armor.percent" => set_bool(&mut config.armor.show_percent, value),
+                "armor.corner" => set_corner(&mut config.armor.corner, value),
+                "armor.scale" => set_index(&mut config.armor.scale, value, SCALES.len()),
+                "pickup.enabled" => set_bool(&mut config.pickup.enabled, value),
+                "pickup.corner" => set_corner(&mut config.pickup.corner, value),
+                "pickup.max" => set_index(&mut config.pickup.max, value, MAX_ENTRIES.len()),
+                "pickup.seconds" => set_index(&mut config.pickup.seconds, value, SECONDS.len()),
                 "extras.enabled" => set_bool(&mut config.extras.enabled, value),
                 "extras.performance" => set_bool(&mut config.extras.performance, value),
                 "extras.survival_alerts" => set_bool(&mut config.extras.survival_alerts, value),
@@ -217,6 +306,12 @@ fn set_bool(slot: &mut bool, value: &str) {
     }
 }
 
+fn set_corner(slot: &mut Corner, value: &str) {
+    if let Some(c) = Corner::from_id(value) {
+        *slot = c;
+    }
+}
+
 fn set_index(slot: &mut usize, value: &str, len: usize) {
     if let Ok(i) = value.parse::<usize>() {
         if i < len {
@@ -236,9 +331,21 @@ mod tests {
         config.nutrition.corner = Corner::TopLeft;
         config.nutrition.scale = 2;
         config.nutrition.opacity = 1;
+        config.armor.show_percent = false;
+        config.armor.corner = Corner::BottomLeft;
+        config.pickup.max = 3;
+        config.pickup.seconds = 0;
+        config.pickup.enabled = false;
         config.extras.minimap = true;
-        config.extras.rotate_map = true;
         assert_eq!(Config::decode(&config.encode()), config);
+    }
+
+    #[test]
+    fn old_settings_keep_new_defaults() {
+        let data = b"version=1\nnutrition.enabled=false\n";
+        let cfg = Config::decode(data);
+        assert!(!cfg.nutrition.enabled);
+        assert_eq!(cfg.extras, ExtrasConfig::default());
     }
 
     #[test]
@@ -260,26 +367,43 @@ mod tests {
     }
 
     #[test]
+    fn a_settings_file_from_before_armor_and_pickups_still_loads() {
+        let text = b"version=1\nnutrition.enabled=false\nnutrition.scale=2\n";
+        let config = Config::decode(text);
+        assert!(!config.nutrition.enabled);
+        assert_eq!(config.nutrition.scale, 2);
+        assert_eq!(config.armor, ArmorConfig::default());
+        assert_eq!(config.pickup, PickupConfig::default());
+    }
+
+    #[test]
     fn bad_fields_fall_back_one_by_one() {
-        let text = b"version=1\nnutrition.enabled=maybe\nnutrition.scale=99\nnutrition.corner=middle\nnutrition.bar=false\nunknown=1\nno equals sign\n";
+        let text = b"version=1\nnutrition.enabled=maybe\nnutrition.scale=99\nnutrition.corner=middle\nnutrition.bar=false\npickup.max=77\nunknown=1\nno equals sign\n";
         let config = Config::decode(text);
         let defaults = Config::default();
         assert_eq!(config.nutrition.enabled, defaults.nutrition.enabled);
         assert_eq!(config.nutrition.scale, defaults.nutrition.scale);
         assert_eq!(config.nutrition.corner, defaults.nutrition.corner);
+        assert_eq!(config.pickup.max, defaults.pickup.max);
         assert!(!config.nutrition.show_bar);
     }
 
     #[test]
     fn cycles_stay_in_range() {
         let mut n = NutritionConfig::default();
+        let mut p = PickupConfig::default();
         for _ in 0..10 {
             n.cycle_scale();
             n.cycle_opacity();
+            p.cycle_max();
+            p.cycle_seconds();
             assert!(n.scale < SCALES.len() && n.opacity < OPACITIES.len());
+            assert!(p.max < MAX_ENTRIES.len() && p.seconds < SECONDS.len());
         }
         n.scale = 999;
         assert_eq!(n.scale_factor(), SCALES[SCALES.len() - 1]);
+        p.max = 999;
+        assert_eq!(p.max_entries(), MAX_ENTRIES[MAX_ENTRIES.len() - 1]);
     }
 
     #[test]

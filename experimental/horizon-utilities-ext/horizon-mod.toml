@@ -1,0 +1,9 @@
+id = "horizon_utilities_ext"
+name = "Horizon Utilities (extended)"
+version = "0.3.0"
+description = "Needs a Horizon extended with vitals, inventory and pickups: real saturation, armor durability, pickup notifications, inventory sort."
+authors = ["ClaudeMod"]
+api = "0.1"
+side = "client"
+capabilities = ["game-read", "storage", "ui", "render", "input", "vitals", "inventory", "pickups"]
+experimental = ["ui", "render", "input", "vitals", "inventory", "pickups"]

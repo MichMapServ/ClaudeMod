@@ -1,15 +1,32 @@
-//! Features supported by Horizon's public mod API: waypoint navigation,
-//! performance display, survival warnings and *held-stack change* hints.
-//! This module intentionally does not pretend to read equipment/inventory,
-//! saturation or pickup events (none is exposed to a .hmod).
+//! Native-to-the-.hmod features that use existing Horizon client imports.
+//! This is an API *inside the guest*, not an unauthorized host import.
+//! Never infer a pickup, saturation, durability or inventory snapshot here.
+
 use crate::config::ExtrasConfig;
 use horizon_mod_sdk::render::{FillShape, Point, Rect, Shape, TextShape};
 use horizon_mod_sdk::{game, input, render};
 
-pub const WAYPOINTS_KEY: &str = "waypoints.v1";
-const MAX_WAYPOINTS: usize = 8;
-const LIMIT: f64 = 30_000_000.0;
+pub const STORAGE_KEY: &str = "waypoints.v2";
+pub const LEGACY_KEY: &str = "waypoints.v1";
 const MAX_BYTES: usize = 4096;
+const MAX_PROFILES: usize = 8;
+const MAX_POINTS: usize = 8;
+const COORD_LIMIT: f64 = 30_000_000.0;
+
+fn safe_name(value: &str) -> bool {
+    (1..=24).contains(&value.len())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+fn safe_dimension(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b":_./-".contains(&b))
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Waypoint {
@@ -21,19 +38,17 @@ pub struct Waypoint {
 }
 
 impl Waypoint {
-    pub fn at(name: &str, dimension: &str, x: f64, y: f64, z: f64) -> Result<Self, String> {
-        if !valid_name(name) {
-            return Err("Nom : 1-24 caractères ASCII (lettres, chiffres, _ ou -)".into());
+    pub fn new(name: &str, dimension: &str, x: f64, y: f64, z: f64) -> Result<Self, String> {
+        if !safe_name(name) {
+            return Err("Nom de waypoint invalide (1-24 caractères : a-z, A-Z, 0-9, _, -)".into());
         }
-        if dimension.is_empty()
-            || dimension.len() > 128
-            || !dimension
-                .bytes()
-                .all(|c| c.is_ascii_alphanumeric() || b":_./-".contains(&c))
-        {
+        if !safe_dimension(dimension) {
             return Err("Dimension invalide".into());
         }
-        if ![x, y, z].iter().all(|v| v.is_finite() && v.abs() <= LIMIT) {
+        if ![x, y, z]
+            .iter()
+            .all(|v| v.is_finite() && v.abs() <= COORD_LIMIT)
+        {
             return Err("Coordonnées invalides".into());
         }
         Ok(Self {
@@ -44,140 +59,223 @@ impl Waypoint {
             z,
         })
     }
-
-    pub fn from_player(name: &str, player: &game::Player) -> Result<Self, String> {
-        Self::at(name, &player.dimension, player.x, player.y, player.z)
-    }
 }
 
-fn valid_name(name: &str) -> bool {
-    (1..=24).contains(&name.len())
-        && name
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+#[derive(Clone, Debug, PartialEq)]
+pub struct Profile {
+    pub name: String,
+    pub points: Vec<Waypoint>,
+    pub selected: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct Waypoints {
-    pub points: Vec<Waypoint>,
+pub struct WaypointStore {
+    pub profiles: Vec<Profile>,
     pub active: Option<String>,
 }
 
-impl Waypoints {
+impl WaypointStore {
+    pub fn create_profile(&mut self, name: &str) -> Result<(), String> {
+        if !safe_name(name) {
+            return Err("Nom de profil invalide".into());
+        }
+        if self.profiles.iter().any(|p| p.name == name) {
+            return Err("Profil déjà présent".into());
+        }
+        if self.profiles.len() == MAX_PROFILES {
+            return Err("Maximum 8 profils".into());
+        }
+        self.profiles.push(Profile {
+            name: name.to_string(),
+            points: Vec::new(),
+            selected: None,
+        });
+        Ok(())
+    }
+
+    pub fn use_profile(&mut self, name: &str) -> Result<(), String> {
+        if !self.profiles.iter().any(|p| p.name == name) {
+            return Err("Profil inconnu. /utilities profile list".into());
+        }
+        self.active = Some(name.to_string());
+        Ok(())
+    }
+
+    pub fn remove_profile(&mut self, name: &str) -> bool {
+        let old = self.profiles.len();
+        self.profiles.retain(|p| p.name != name);
+        if self.active.as_deref() == Some(name) {
+            self.active = None;
+        }
+        self.profiles.len() != old
+    }
+
+    pub fn current(&self) -> Option<&Profile> {
+        self.profiles
+            .iter()
+            .find(|p| Some(p.name.as_str()) == self.active.as_deref())
+    }
+
+    pub fn current_mut(&mut self) -> Result<&mut Profile, String> {
+        self.profiles
+            .iter_mut()
+            .find(|p| Some(p.name.as_str()) == self.active.as_deref())
+            .ok_or_else(|| {
+                "Choisis d'abord un profil : /utilities profile add NOM puis use NOM".into()
+            })
+    }
+
     pub fn add(&mut self, point: Waypoint) -> Result<(), String> {
-        if let Some(existing) = self.points.iter_mut().find(|p| p.name == point.name) {
+        let profile = self.current_mut()?;
+        if let Some(existing) = profile.points.iter_mut().find(|p| p.name == point.name) {
             *existing = point;
-        } else if self.points.len() == MAX_WAYPOINTS {
-            return Err("Maximum 8 points de repère ; supprimez-en un".into());
+        } else if profile.points.len() >= MAX_POINTS {
+            return Err("Maximum 8 waypoints par profil".into());
         } else {
-            self.points.push(point);
+            profile.points.push(point);
         }
         Ok(())
     }
 
     pub fn select(&mut self, name: &str) -> Result<(), String> {
-        if self.points.iter().any(|p| p.name == name) {
-            self.active = Some(name.to_string());
-            Ok(())
-        } else {
-            Err(format!("Point inconnu : {name}"))
+        let profile = self.current_mut()?;
+        if !profile.points.iter().any(|p| p.name == name) {
+            return Err("Waypoint inconnu".into());
         }
+        profile.selected = Some(name.to_string());
+        Ok(())
     }
 
-    pub fn remove(&mut self, name: &str) -> bool {
-        let before = self.points.len();
-        self.points.retain(|p| p.name != name);
-        if self.active.as_deref() == Some(name) {
-            self.active = None;
+    pub fn remove(&mut self, name: &str) -> Result<bool, String> {
+        let profile = self.current_mut()?;
+        let old = profile.points.len();
+        profile.points.retain(|p| p.name != name);
+        if profile.selected.as_deref() == Some(name) {
+            profile.selected = None;
         }
-        before != self.points.len()
+        Ok(profile.points.len() != old)
     }
 
     pub fn selected(&self) -> Option<&Waypoint> {
-        self.points
+        let p = self.current()?;
+        p.points
             .iter()
-            .find(|p| Some(p.name.as_str()) == self.active.as_deref())
+            .find(|w| Some(w.name.as_str()) == p.selected.as_deref())
     }
 
     pub fn encode(&self) -> Vec<u8> {
-        let mut result = String::from("version=1\n");
-        if let Some(name) = &self.active {
-            result.push_str(&format!("active={name}\n"));
+        let mut lines = vec!["version=2".to_string()];
+        // Deliberately DO NOT persist active profile across game sessions:
+        // the SDK provides no stable world identity to bind the selection to.
+        for profile in &self.profiles {
+            lines.push(format!("profile={}", profile.name));
+            if let Some(name) = &profile.selected {
+                lines.push(format!("selected={}|{name}", profile.name));
+            }
+            for p in &profile.points {
+                lines.push(format!(
+                    "point={}|{}|{}|{:.3}|{:.3}|{:.3}",
+                    profile.name, p.name, p.dimension, p.x, p.y, p.z
+                ));
+            }
         }
-        for p in &self.points {
-            result.push_str(&format!(
-                "point={}|{}|{:.3}|{:.3}|{:.3}\n",
-                p.name, p.dimension, p.x, p.y, p.z
-            ));
-        }
-        result.into_bytes()
+        (lines.join("\n") + "\n").into_bytes()
     }
 
     pub fn decode(bytes: &[u8]) -> Self {
         if bytes.len() > MAX_BYTES {
             return Self::default();
         }
-        let Ok(text) = std::str::from_utf8(bytes) else {
+        let Ok(src) = std::str::from_utf8(bytes) else {
             return Self::default();
         };
-        if !text.lines().any(|line| line == "version=1") {
+        if src.lines().next() != Some("version=2") {
             return Self::default();
         }
-        let mut out = Self::default();
-        let mut active = None;
-        for line in text.lines() {
-            if let Some(name) = line.strip_prefix("active=") {
-                if valid_name(name) {
-                    active = Some(name.to_string());
+        let mut result = Self::default();
+        let mut selections: Vec<(&str, &str)> = Vec::new();
+        for line in src.lines().skip(1) {
+            if let Some(name) = line.strip_prefix("profile=") {
+                let _ = result.create_profile(name);
+            } else if let Some(pair) = line.strip_prefix("selected=") {
+                if let Some((profile, name)) = pair.split_once('|') {
+                    selections.push((profile, name));
                 }
-            }
-            if let Some(data) = line.strip_prefix("point=") {
-                let fields: Vec<&str> = data.split('|').collect();
-                if let [name, dimension, x, y, z] = fields.as_slice() {
+            } else if let Some(data) = line.strip_prefix("point=") {
+                let fields: Vec<_> = data.split('|').collect();
+                if let [profile, name, dim, xs, ys, zs] = fields.as_slice() {
                     if let (Ok(x), Ok(y), Ok(z)) =
-                        (x.parse::<f64>(), y.parse::<f64>(), z.parse::<f64>())
+                        (xs.parse::<f64>(), ys.parse::<f64>(), zs.parse::<f64>())
                     {
-                        if let Ok(p) = Waypoint::at(name, dimension, x, y, z) {
-                            let _ = out.add(p);
+                        if let Ok(w) = Waypoint::new(name, dim, x, y, z) {
+                            if let Some(p) = result.profiles.iter_mut().find(|p| p.name == *profile)
+                            {
+                                if let Some(old) = p.points.iter_mut().find(|q| q.name == w.name) {
+                                    *old = w;
+                                } else if p.points.len() < MAX_POINTS {
+                                    p.points.push(w);
+                                }
+                            }
                         }
                     }
                 }
             }
         }
-        if let Some(name) = active {
-            let _ = out.select(&name);
+        for (profile, selected) in selections {
+            if let Some(p) = result.profiles.iter_mut().find(|p| p.name == profile) {
+                if p.points.iter().any(|w| w.name == selected) {
+                    p.selected = Some(selected.to_string());
+                }
+            }
         }
-        out
+        // Deliberately leave `active` as None until the player selects a
+        // profile again in the current game session.
+        result
     }
 
-    pub fn list(&self) -> String {
-        if self.points.is_empty() {
-            return "Aucun waypoint. /utilities wp add NOM".into();
+    /// Previous version was global across all worlds. Keep the data in
+    /// an explicitly named `legacy` profile, but never activate it.
+    pub fn migrate_v1(bytes: &[u8]) -> Self {
+        let mut store = Self::default();
+        if bytes.len() > MAX_BYTES {
+            return store;
         }
-        self.points
-            .iter()
-            .map(|p| {
-                format!(
-                    "{}{} ({:.0}, {:.0}, {:.0}, {})",
-                    if self.active.as_deref() == Some(p.name.as_str()) {
-                        "*"
-                    } else {
-                        ""
-                    },
-                    p.name,
-                    p.x,
-                    p.y,
-                    p.z,
-                    p.dimension
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" ; ")
+        let Ok(src) = std::str::from_utf8(bytes) else {
+            return store;
+        };
+        if src.lines().next() != Some("version=1") {
+            return store;
+        }
+        let _ = store.create_profile("legacy");
+        for line in src.lines().skip(1) {
+            if let Some(data) = line.strip_prefix("point=") {
+                let fields: Vec<_> = data.split('|').collect();
+                if let [name, dim, xs, ys, zs] = fields.as_slice() {
+                    if let (Ok(x), Ok(y), Ok(z)) =
+                        (xs.parse::<f64>(), ys.parse::<f64>(), zs.parse::<f64>())
+                    {
+                        if let Ok(w) = Waypoint::new(name, dim, x, y, z) {
+                            // Directly write the migration target without
+                            // activating it automatically.
+                            if let Some(p) = store.profiles.first_mut() {
+                                if p.points.len() < MAX_POINTS {
+                                    p.points.push(w);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        store
     }
 }
 
-/// Minecraft yaw 0 faces south, -90 east, +90 west.
+/// Minecraft yaw 0 = south, -90 = east, +90 = west.
 pub fn relative_direction(yaw: f32, dx: f64, dz: f64) -> &'static str {
+    if !yaw.is_finite() || !dx.is_finite() || !dz.is_finite() {
+        return "direction inconnue";
+    }
     if dx.abs() + dz.abs() < 0.5 {
         return "sur place";
     }
@@ -186,7 +284,7 @@ pub fn relative_direction(yaw: f32, dx: f64, dz: f64) -> &'static str {
     if diff.abs() <= 35.0 {
         "devant"
     } else if diff.abs() >= 145.0 {
-        "derriere"
+        "derrière"
     } else if diff < 0.0 {
         "droite"
     } else {
@@ -194,11 +292,13 @@ pub fn relative_direction(yaw: f32, dx: f64, dz: f64) -> &'static str {
     }
 }
 
-pub fn waypoint_hint(player: &game::Player, point: &Waypoint) -> String {
+pub fn nav_hint(player: &game::Player, point: &Waypoint) -> String {
     if player.dimension != point.dimension {
         return format!("Cap {} : autre dimension", point.name);
     }
-    let (dx, dy, dz) = (point.x - player.x, point.y - player.y, point.z - player.z);
+    let dx = point.x - player.x;
+    let dy = point.y - player.y;
+    let dz = point.z - player.z;
     let distance = (dx * dx + dy * dy + dz * dz).sqrt();
     format!(
         "Cap {} : {:.0} m, {}, Y {:+.0}",
@@ -210,30 +310,42 @@ pub fn waypoint_hint(player: &game::Player, point: &Waypoint) -> String {
 }
 
 #[derive(Default)]
-pub struct Runtime {
-    last_held: Option<input::HeldItem>,
+pub struct Telemetry {
+    previous: Option<input::HeldItem>,
+    last_tick: Option<u64>,
     notice: Option<(String, u64)>,
-    lines: Vec<String>,
-    map: Option<(bool, bool)>,
-    /// Needed to reposition the top HUD when the GUI is resized.
-    last_gui_width: Option<f32>,
+    previous_lines: Vec<String>,
+    previous_gui: (f32, f32),
+    minimap: Option<bool>,
 }
 
-impl Runtime {
-    pub fn hand(&mut self, held: Option<input::HeldItem>, tick: u64, track: bool) {
+impl Telemetry {
+    pub fn clear(&mut self) {
+        if self.minimap.take().is_some() {
+            render::set_minimap(None);
+        }
+        self.previous = None;
+        self.last_tick = None;
+        self.notice = None;
+        self.previous_lines.clear();
+        self.previous_gui = (0.0, 0.0);
+        self.minimap = None;
+    }
+
+    pub fn sample(&mut self, held: Option<input::HeldItem>, tick: u64, track: bool) {
         if track {
-            if let (Some(before), Some(after)) = (&self.last_held, &held) {
-                if before.slot == after.slot && before.id == after.id && before.count != after.count
+            if let (Some(previous), Some(current), Some(last_tick)) =
+                (&self.previous, &held, self.last_tick)
+            {
+                if tick == last_tick.saturating_add(1)
+                    && previous.slot == current.slot
+                    && previous.id == current.id
+                    && previous.count != current.count
                 {
-                    let delta = i64::from(after.count) - i64::from(before.count);
-                    let label = after
-                        .id
-                        .rsplit(':')
-                        .next()
-                        .unwrap_or(&after.id)
-                        .replace('_', " ");
+                    let delta = i64::from(current.count) - i64::from(previous.count);
+                    let item = current.id.rsplit(':').next().unwrap_or(&current.id);
                     self.notice = Some((
-                        format!("Main {delta:+} {label} (cause inconnue)"),
+                        format!("Main {delta:+} {} (cause inconnue)", item.replace('_', " ")),
                         tick.saturating_add(60),
                     ));
                 }
@@ -241,137 +353,121 @@ impl Runtime {
         } else {
             self.notice = None;
         }
-        self.last_held = held;
+        self.previous = held;
+        self.last_tick = Some(tick);
     }
 
-    pub fn clear(&mut self) {
-        if !self.lines.is_empty() {
-            render::set_hud(&[]);
-            self.lines.clear();
-        }
-        if self.map.take().is_some() {
-            render::set_minimap(None);
-        }
-        self.last_held = None;
-        self.notice = None;
-        self.last_gui_width = None;
-    }
-
-    pub fn refresh(
+    pub fn lines(
         &mut self,
         cfg: &ExtrasConfig,
-        waypoints: &Waypoints,
+        waypoints: &WaypointStore,
         player: &game::Player,
         tick: u64,
-    ) {
-        let wanted_map = if cfg.enabled && cfg.minimap {
-            Some((cfg.minimap, cfg.rotate_map))
+    ) -> Vec<String> {
+        if !cfg.enabled {
+            return Vec::new();
+        }
+        let mut rows = Vec::new();
+        if cfg.performance {
+            let frame = render::frame_stats();
+            let (attack, use_clicks) = input::clicks_per_second();
+            rows.push(format!(
+                "FPS {} / 1% {} | CPS {attack}/{use_clicks}",
+                frame.fps, frame.low
+            ));
+        }
+        if cfg.survival_alerts {
+            if player.food <= 6 {
+                rows.push(format!("ATTENTION faim {}/20", player.food));
+            }
+            if player.health <= 6.0 {
+                rows.push(format!("ATTENTION vie {:.0}/20", player.health));
+            }
+        }
+        if cfg.navigation {
+            if let Some(point) = waypoints.selected() {
+                rows.push(nav_hint(player, point));
+            }
+        }
+        if cfg.held_changes {
+            if let Some((msg, end)) = &self.notice {
+                if tick < *end {
+                    rows.push(msg.clone());
+                } else {
+                    self.notice = None;
+                }
+            }
+        }
+        rows
+    }
+
+    pub fn panel(&mut self, lines: &[String], size: (f32, f32)) -> Vec<Shape> {
+        if lines == self.previous_lines && self.previous_gui == size {
+            return Vec::new();
+        }
+        self.previous_lines = lines.to_vec();
+        self.previous_gui = size;
+        if lines.is_empty() {
+            return Vec::new();
+        }
+        let width = lines
+            .iter()
+            .map(|line| render::text_width(line))
+            .fold(0.0_f32, f32::max)
+            + 12.0;
+        let width = width.max(24.0);
+        let height = (lines.len() as f32 * 11.0) + 8.0;
+        let left = ((size.0 - width) / 2.0).max(2.0);
+        let top = 10.0;
+        let mut out = vec![Shape::Fill(FillShape {
+            rect: Rect {
+                x: left,
+                y: top,
+                w: width,
+                h: height,
+            },
+            color: 0x9900_0000,
+        })];
+        for (i, line) in lines.iter().enumerate() {
+            out.push(Shape::Text(TextShape {
+                text: line.clone(),
+                at: Point {
+                    x: left + 6.0,
+                    y: top + 4.0 + i as f32 * 11.0,
+                },
+                color: if line.starts_with("ATTENTION") {
+                    0xFF7777
+                } else {
+                    0xFFFFFF
+                },
+                centered: false,
+                shadow: true,
+            }));
+        }
+        out
+    }
+
+    pub fn minimap(&mut self, cfg: &ExtrasConfig) {
+        let desired = if cfg.enabled && cfg.minimap {
+            Some(cfg.rotate_map)
         } else {
             None
         };
-        if self.map != wanted_map {
-            render::set_minimap(wanted_map.map(|(_, rotate)| render::Minimap {
+        if self.minimap != desired {
+            render::set_minimap(desired.map(|rotate| render::Minimap {
                 corner: render::Corner::TopRight,
                 size: 112.0,
                 blocks_per_pixel: 2.0,
                 rotate,
                 round: true,
             }));
-            self.map = wanted_map;
+            self.minimap = desired;
         }
-
-        let mut lines = Vec::new();
-        if cfg.enabled {
-            if cfg.performance {
-                let rate = render::frame_stats();
-                let (attack, use_clicks) = input::clicks_per_second();
-                lines.push(format!(
-                    "FPS {} | 1% {} | CPS {}/{}",
-                    rate.fps, rate.low, attack, use_clicks
-                ));
-            }
-            if cfg.survival_alerts && player.food <= 6 {
-                lines.push(format!("ATTENTION : faim {}/20", player.food));
-            }
-            if cfg.survival_alerts && player.health <= 6.0 {
-                lines.push(format!("ATTENTION : vie {:.0}/20", player.health));
-            }
-            if cfg.navigation {
-                if let Some(point) = waypoints.selected() {
-                    lines.push(waypoint_hint(player, point));
-                }
-            }
-            if cfg.held_changes {
-                if let Some((message, expires)) = &self.notice {
-                    if tick < *expires {
-                        lines.push(message.clone());
-                    } else {
-                        self.notice = None;
-                    }
-                }
-            }
-        }
-        // Rendered HUD positions are screen-relative. An unchanged string is
-        // NOT an unchanged layout after a window/GUI-scale change.
-        let gui_width = if lines.is_empty() {
-            None
-        } else {
-            Some(render::gui_size().0)
-        };
-        if lines == self.lines && gui_width == self.last_gui_width {
-            return;
-        }
-        if lines.is_empty() {
-            render::set_hud(&[]);
-        } else {
-            let screen_w = gui_width.unwrap_or(0.0);
-            let width = lines
-                .iter()
-                .map(|s| render::text_width(s))
-                .fold(0.0_f32, f32::max)
-                + 12.0;
-            let height = lines.len() as f32 * 11.0 + 8.0;
-            let left = hud_left(screen_w, width);
-            let top = 8.0;
-            let mut shapes = vec![Shape::Fill(FillShape {
-                rect: Rect {
-                    x: left,
-                    y: top,
-                    w: width,
-                    h: height,
-                },
-                color: 0x99000000,
-            })];
-            for (i, line) in lines.iter().enumerate() {
-                shapes.push(Shape::Text(TextShape {
-                    text: line.clone(),
-                    at: Point {
-                        x: left + 6.0,
-                        y: top + 4.0 + i as f32 * 11.0,
-                    },
-                    color: if line.starts_with("ATTENTION") {
-                        0xFF8888
-                    } else {
-                        0xFFFFFF
-                    },
-                    centered: false,
-                    shadow: true,
-                }));
-            }
-            render::set_hud(&shapes);
-        }
-        self.lines = lines;
-        self.last_gui_width = gui_width;
     }
-}
 
-/// If the panel is wider than the viewport it anchors to the left rather
-/// than moving to a negative coordinate; no screen-size data is persisted.
-fn hud_left(viewport: f32, panel: f32) -> f32 {
-    if !viewport.is_finite() || !panel.is_finite() {
-        return 2.0;
+    pub fn has_panel_changed(&self, lines: &[String], size: (f32, f32)) -> bool {
+        self.previous_lines != lines || self.previous_gui != size
     }
-    ((viewport - panel) / 2.0).max(2.0)
 }
 
 #[cfg(test)]
@@ -379,57 +475,100 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hud_reflow_centers_after_resize() {
-        assert_eq!(hud_left(300.0, 100.0), 100.0);
-        assert_eq!(hud_left(500.0, 100.0), 200.0);
-        assert_eq!(hud_left(90.0, 100.0), 2.0);
-        assert_eq!(hud_left(f32::NAN, 100.0), 2.0);
-    }
-
-    #[test]
-    fn waypoints_roundtrip_and_select() {
-        let mut points = Waypoints::default();
-        points
-            .add(Waypoint::at("base", "minecraft:overworld", 12.0, 64.0, -4.0).unwrap())
+    fn profile_is_explicit() {
+        let mut db = WaypointStore::default();
+        db.create_profile("worldA").unwrap();
+        db.add(Waypoint::new("home", "minecraft:overworld", 1.0, 64.0, 2.0).unwrap())
+            .unwrap_err();
+        db.use_profile("worldA").unwrap();
+        db.add(Waypoint::new("home", "minecraft:overworld", 1.0, 64.0, 2.0).unwrap())
             .unwrap();
-        points.select("base").unwrap();
-        assert_eq!(Waypoints::decode(&points.encode()), points);
-        assert!(points.remove("base"));
-        assert!(points.active.is_none());
+        assert!(db.selected().is_none());
+        db.select("home").unwrap();
+        assert!(db.selected().is_some());
+        db.create_profile("worldB").unwrap();
+        db.use_profile("worldB").unwrap();
+        assert!(db.selected().is_none());
     }
 
     #[test]
-    fn invalid_waypoints_are_rejected() {
-        assert!(Waypoint::at("bad name", "minecraft:overworld", 0.0, 1.0, 2.0).is_err());
-        assert!(Waypoint::at("abc", "minecraft:overworld", f64::NAN, 1.0, 2.0).is_err());
-        assert!(Waypoint::at("abc", "minecraft:overworld", 30_000_001.0, 1.0, 2.0).is_err());
-        assert_eq!(Waypoints::decode(b"other=2"), Waypoints::default());
-    }
-
-    #[test]
-    fn direction_is_correct_for_minecraft_yaw() {
-        assert_eq!(relative_direction(0.0, 0.0, 10.0), "devant");
-        assert_eq!(relative_direction(0.0, 10.0, 0.0), "droite");
-        assert_eq!(relative_direction(0.0, -10.0, 0.0), "gauche");
-        assert_eq!(relative_direction(0.0, 0.0, -10.0), "derriere");
-        assert_eq!(relative_direction(-90.0, 10.0, 0.0), "devant");
-    }
-
-    #[test]
-    fn capacity_and_replacement() {
-        let mut w = Waypoints::default();
-        for i in 0..8 {
-            w.add(
-                Waypoint::at(&format!("w{i}"), "minecraft:overworld", i as f64, 1.0, 2.0).unwrap(),
-            )
+    fn round_trip() {
+        let mut db = WaypointStore::default();
+        db.create_profile("worldA").unwrap();
+        db.use_profile("worldA").unwrap();
+        db.add(Waypoint::new("home", "minecraft:overworld", 1.0, 64.0, 2.0).unwrap())
             .unwrap();
-        }
+        db.select("home").unwrap();
+        let decoded = WaypointStore::decode(&db.encode());
+        assert_eq!(decoded.profiles, db.profiles);
+        assert_eq!(decoded.active, None);
+    }
+
+    #[test]
+    fn stale_profile_selection_is_never_loaded() {
+        let content = b"version=2\nactive=wrongworld\nprofile=wrongworld\n";
+        let loaded = WaypointStore::decode(content);
+        assert_eq!(loaded.active, None);
+    }
+
+    #[test]
+    fn v1_migration_is_not_active() {
+        let old = b"version=1\nactive=base\npoint=base|minecraft:overworld|10|64|20\n";
+        let db = WaypointStore::migrate_v1(old);
+        assert_eq!(db.active, None);
+        assert_eq!(db.profiles[0].name, "legacy");
+        assert_eq!(db.profiles[0].points.len(), 1);
+    }
+
+    #[test]
+    fn discontinuous_ticks_do_not_look_like_pickups() {
+        let mut sample = Telemetry::default();
+        let item = |count| input::HeldItem {
+            id: "minecraft:stone".into(),
+            count,
+            slot: 0,
+        };
+        sample.sample(Some(item(10)), 15, true);
+        sample.sample(Some(item(30)), 25, true);
+        assert!(sample.notice.is_none());
+        sample.sample(Some(item(31)), 26, true);
+        assert!(sample.notice.as_ref().unwrap().0.contains("cause inconnue"));
+        sample.sample(Some(item(32)), 27, false);
+        assert!(sample.notice.is_none());
+    }
+
+    #[test]
+    fn oversized_records_cannot_be_loaded() {
+        let data = vec![b'x'; 4097];
+        assert!(WaypointStore::decode(&data).profiles.is_empty());
+        assert!(WaypointStore::migrate_v1(&data).profiles.is_empty());
+    }
+
+    #[test]
+    fn unsafe_values_rejected() {
+        assert!(Waypoint::new("bad|name", "minecraft:overworld", 0.0, 0.0, 0.0).is_err());
+        assert!(Waypoint::new("base", "minecraft:overworld", f64::NAN, 0.0, 0.0).is_err());
         assert!(
-            w.add(Waypoint::at("too-many", "minecraft:overworld", 0.0, 0.0, 0.0).unwrap())
-                .is_err()
+            WaypointStore::decode(b"version=2\npoint=bad|x|y|z|0|0\n")
+                .profiles
+                .is_empty()
         );
-        w.add(Waypoint::at("w0", "minecraft:overworld", 9.0, 1.0, 2.0).unwrap())
-            .unwrap();
-        assert_eq!(w.points.len(), 8);
+    }
+
+    #[test]
+    fn directions_match_camera() {
+        assert_eq!(relative_direction(0.0, 0.0, 5.0), "devant");
+        assert_eq!(relative_direction(0.0, 5.0, 0.0), "droite");
+        assert_eq!(relative_direction(0.0, -5.0, 0.0), "gauche");
+        assert_eq!(relative_direction(-90.0, 5.0, 0.0), "devant");
+    }
+
+    #[test]
+    fn profile_limits_enforced() {
+        let mut db = WaypointStore::default();
+        for i in 0..8 {
+            db.create_profile(&format!("profile{i}")).unwrap();
+        }
+        assert!(db.create_profile("ninth").is_err());
     }
 }

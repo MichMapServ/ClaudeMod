@@ -5,10 +5,16 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "Horizon Utilities: nutrition, navigation et performances (API 0.1)"
+description = "Horizon Utilities: nutrition HUD for Horizon (mod API 0.1)"
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
 horizon-mod-sdk.workspace = true
+
+[features]
+default = []
+# Extended mode: needs a Horizon extended as ENGINE_PATCH.md says and its SDK.
+# Built by experimental/horizon-utilities-ext, not by the workspace.
+native = []
