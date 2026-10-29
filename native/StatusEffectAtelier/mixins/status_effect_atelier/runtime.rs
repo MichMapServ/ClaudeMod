@@ -114,7 +114,7 @@ struct Row<'a> {
     time: String,
     ratio: f32,
 }
-fn rows(game: &Game<'_>) -> Vec<Row<'_>> {
+fn rows<'a, 'g>(game: &'a Game<'g>) -> Vec<Row<'a>> {
     let all=&game.potions.effects.list;
     if all.is_empty() {reset_on_empty();return Vec::new();}
     // Cache only currently active effects, preventing stale maxima if one expires.
@@ -222,7 +222,7 @@ fn draw_hud(game:&Game<'_>,batch:&mut HudBatch,force_inventory_fallback:bool) {
     if !game.native_corner_shown(Corner::TopRight) && value(game,"side","left")=="right" {return;}
     let all=rows(game);
     let mode=value(game,"mode","cards");
-    let w0=match value(game,"width","medium").as_str() {"small"=>138.0,"large"=>202.0,_=>170.0};
+    let w0: f32=match value(game,"width","medium").as_str() {"small"=>138.0,"large"=>202.0,_=>170.0};
     let w=w0.min((batch.width-12.0).max(0.0));
     if w<30.0{return;}
     let right=value(game,"side","left")=="right";
@@ -255,9 +255,10 @@ pub(super) fn inventory(game:&Game<'_>,batch:&mut HudBatch,origin:(f32,f32),imag
     let x=origin.0+image_width as f32+4.0;
     let avail=batch.width as f32-x-5.0;
     if avail<32.0 { draw_hud(game,batch,true); return; }
-    let w=match value(game,"width","medium").as_str(){
+    let requested: f32=match value(game,"width","medium").as_str(){
         "small"=>138.0,"large"=>202.0,_=>170.0
-    }.min(avail);
+    };
+    let w=requested.min(avail);
     let mode=if w<96.0 {"icons".to_string()} else {value(game,"mode","cards")};
     let stride=if mode=="icons"{32.0}else if mode=="compact"{37.0}else{46.0};
     let list=rows(game);
