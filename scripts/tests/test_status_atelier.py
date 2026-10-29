@@ -25,6 +25,7 @@ class NativeStatusAtelierTests(unittest.TestCase):
         self.assertIn("mob_effect/{id}",source)
         self.assertIn("game.potions.effects.list",source)
         self.assertIn("vanilla_hud",source)
+        self.assertFalse(source.startswith("//!"),"Mixins forbids support module file attributes")
         self.assertIn("inventory_effects::paint",source)
 
     def test_deterministic_package_and_tamper_detection(self):
