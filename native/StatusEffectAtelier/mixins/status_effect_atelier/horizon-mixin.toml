@@ -1,0 +1,70 @@
+[mod]
+id = "status_effect_atelier"
+version = "0.1.0"
+priority = 145
+
+# Two direct render replacements deliberately require the exact engine commit.
+[compatibility]
+horizon_revision = "8474ac55c9f6f581e2bb984af9efcb18666bdbb2"
+
+[[module]]
+id = "runtime"
+file = "crates/horizon-client/src/game.rs"
+name = "status_effect_atelier"
+source = "runtime.rs"
+
+[[injection]]
+id = "mod-list"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_mods"
+helper = "list.rs"
+bindings = [
+  { name = "mods", ty = "&mut Vec<crate::game::native_hooks::NativeMod>", value = "&mut *mods" },
+]
+
+[[injection]]
+id = "settings"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_settings"
+helper = "settings.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "mod_id", ty = "&str", value = "mod_id" },
+  { name = "buttons", ty = "&mut Vec<String>", value = "&mut *buttons" },
+]
+
+[[injection]]
+id = "settings-click"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_settings_click"
+helper = "settings_click.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "mod_id", ty = "&str", value = "mod_id" },
+  { name = "button", ty = "usize", value = "button" },
+]
+
+# Replace only the game's two existing effect painters, not the game HUD.
+# Both restore the vanilla painter whenever this mod is disabled.
+[[injection]]
+id = "hud-effect-cards"
+kind = "OVERWRITE"
+target = "horizon_client::game::potions::Game<'_>::draw_effect_icons"
+helper = "hud.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "batch", ty = "&mut horizon_client::hud::HudBatch", value = "&mut *batch" },
+  { name = "inventory_effects", ty = "bool", value = "self.screen_shows_active_effects(batch)" },
+]
+
+[[injection]]
+id = "inventory-effect-cards"
+kind = "OVERWRITE"
+target = "horizon_client::game::potions::Game<'_>::draw_inventory_effects"
+helper = "inventory.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "batch", ty = "&mut horizon_client::hud::HudBatch", value = "&mut *batch" },
+  { name = "origin", ty = "(f32, f32)", value = "origin" },
+  { name = "image_width", ty = "i32", value = "image_width" },
+]
