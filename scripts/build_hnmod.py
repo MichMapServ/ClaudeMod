@@ -10,10 +10,11 @@ def entries():
     mixin=tomllib.loads((src/"horizon-mixin.toml").read_text())
     assert mixin["mod"]["id"]=="horizon_utilities"
     assert mixin["compatibility"]["horizon_revision"]==compat["horizon_revision"]
+    assert isinstance(compat["hooks"], int) and compat["hooks"] >= 1
     assert all(re.fullmatch("[0-9a-f]{40}",compat[k]) for k in ("horizon_revision","horizon_mixins_revision"))
     for hook in mixin["injection"]:
         assert (src/hook["helper"]).is_file()
-    data={"schema":1,"id":mixin["mod"]["id"],"version":mixin["mod"]["version"],"game":compat["game"],"horizon":compat["horizon_revision"],"mixins":compat["horizon_mixins_revision"]}
+    data={"schema":1,"id":mixin["mod"]["id"],"version":mixin["mod"]["version"],"game":compat["game"],"horizon":compat["horizon_revision"],"mixins":compat["horizon_mixins_revision"],"hooks":compat["hooks"]}
     files={"horizon-native.json":(json.dumps(data,indent=2,sort_keys=True)+"\n").encode()}
     for p in sorted(src.iterdir()):
         assert p.is_file() and not p.is_symlink() and p.suffix in (".rs",".toml") and p.stat().st_size<=1048576
