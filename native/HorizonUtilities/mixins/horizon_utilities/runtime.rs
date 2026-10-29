@@ -355,8 +355,8 @@ mod tests {
     #[test] fn corrupted_waypoints_are_ignored(){assert!(parse_point("a|b|minecraft:overworld|NaN|4|5").is_none());assert!(parse_point("a|b|minecraft:overworld|1|2|3").is_some());}
     #[test] fn relative_direction_matches_yaw(){
         assert_eq!(relative_direction(0.0,0.0,10.0),"devant");
-        assert_eq!(relative_direction(0.0,10.0,0.0),"droite");
-        assert_eq!(relative_direction(0.0,-10.0,0.0),"gauche");
+        assert_eq!(relative_direction(0.0,10.0,0.0),"gauche");
+        assert_eq!(relative_direction(0.0,-10.0,0.0),"droite");
         assert_eq!(relative_direction(-90.0,10.0,0.0),"devant");
         assert_eq!(relative_direction(0.0,0.0,-10.0),"derriere");
         assert_eq!(relative_direction(f32::NAN,1.0,0.0),"cap inconnu");
