@@ -287,7 +287,7 @@ pub(super) fn command(game:&mut Game<'_>,text:&str) {
                         && points.iter().map(|p|&p.profile).collect::<std::collections::HashSet<_>>().len()>=MAX_PROFILES {
                         game.native_chat("Maximum 12 profils");return;
                     }
-                    points.push(Waypoint{profile,name:(*name).into(),dimension:player.dimension.into(),x:player.x,y:player.y,z:player.z});
+                    points.push(Waypoint{profile:profile.clone(),name:(*name).into(),dimension:player.dimension.into(),x:player.x,y:player.y,z:player.z});
                 }
                 save_points(game,&points).map(|()|{
                     game.native_set_setting(ID,"selected_waypoint",name);
