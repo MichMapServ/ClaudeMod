@@ -31,8 +31,8 @@ To install, download the CI artifact, verify its SHA-256, put the .hnmod in the 
 
 ## Compatibility and limitations
 
-- Two function replacements overwrite Horizon's effect icon and inventory effects painters. This requires the EXACT source revision: it is not a stable-hooks-only mod and may conflict with other mods modifying the same functions.
-- If disabled, Horizon's vanilla effects drawing is restored. The restored inventory painter does not reproduce its clipped-text tooltip.
+- Two cancellable HEAD injections intercept Horizon's effect icon and inventory effects painters. This requires the EXACT source revision: it is not a stable-hooks-only mod and can interact with other mods targeting the same drawing functions.
+- If disabled, the original Horizon renderer runs unchanged, including its inventory tooltips.
 - Bar fill is relative to the longest *observed* duration of an effect, not an internal server-provided maximum. A refresh or hidden effect replacement may change this denominator.
 - Client tick durations are estimates; tests of real-time rendering and interaction on Windows are still necessary after CI passes.
 - No external PNG is shipped inside the .hnmod: native packaging allows only .rs/.toml. In-game effect icons are already textures and are loaded from the player's vanilla/resource-pack atlas; the new chrome is rendered pixel-by-pixel in Rust.
