@@ -53,7 +53,6 @@ target = "horizon_client::game::potions::Game<'_>::draw_effect_icons"
 helper = "hud.rs"
 bindings = [
   { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
-  { name = "inventory_effects", ty = "bool", value = "self.screen_shows_active_effects(batch)" },
   { name = "batch", ty = "&mut horizon_client::hud::HudBatch", value = "&mut *batch" },
 ]
 
