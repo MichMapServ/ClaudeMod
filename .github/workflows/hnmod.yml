@@ -73,6 +73,8 @@ jobs:
           # A source archive does not include Git metadata; mirror that behavior.
           rm -rf "$RUNNER_TEMP/horizon/.git"
           find "$RUNNER_TEMP/horizon" -type l -print -delete
+          # horizon-mixins validates the exact source revision from this marker.
+          printf '%s' "$HORIZON_REV" > "$RUNNER_TEMP/horizon/.horizon-revision"
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: horizonutilities-native-1.99.1
