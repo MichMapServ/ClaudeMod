@@ -8,7 +8,6 @@ class TestHnmod(unittest.TestCase):
         info,entries=mod.entries()
         self.assertEqual(info["id"],"horizon_utilities")
         self.assertEqual(len(info["horizon"]),40)
-        self.assertEqual(info["hooks"],2)
         self.assertGreaterEqual(len(entries),10)
     def test_determinism_and_integrity(self):
         with tempfile.TemporaryDirectory() as d:
@@ -18,6 +17,6 @@ class TestHnmod(unittest.TestCase):
             with zipfile.ZipFile(a) as z:
                 import json
                 manifest=json.loads(z.read("horizon-native.json"))
-                self.assertEqual(manifest["hooks"],2)
+                self.assertNotIn("hooks",manifest)
             with zipfile.ZipFile(a,"a") as z: z.writestr("../unexpected.rs","evil")
             with self.assertRaises(AssertionError):mod.check(a)
