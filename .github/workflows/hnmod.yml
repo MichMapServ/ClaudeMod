@@ -69,6 +69,10 @@ jobs:
           git -C "$RUNNER_TEMP/horizon" fetch --depth 1 origin "$HORIZON_REV"
           git -C "$RUNNER_TEMP/horizon" checkout --detach FETCH_HEAD
           test "$(git -C "$RUNNER_TEMP/horizon" rev-parse HEAD)" = "$HORIZON_REV"
+          # The mixins staging security check deliberately rejects symbolic links.
+          # A source archive does not include Git metadata; mirror that behavior.
+          rm -rf "$RUNNER_TEMP/horizon/.git"
+          find "$RUNNER_TEMP/horizon" -type l -print -delete
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: horizonutilities-native-1.99.1
