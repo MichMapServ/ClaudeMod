@@ -39,7 +39,7 @@ fn enabled(game: &Game<'_>) -> bool {
 pub(super) fn settings(game: &Game<'_>) -> Vec<String> {
     KEYS.iter().map(|(key, title, fallback)| {
         let v = value(game,key,fallback);
-        let display = match (key.as_ref(),v.as_str()) {
+        let display = match (*key,v.as_str()) {
             (_, "true") => "ON",
             (_, "false") => "OFF",
             (_, "cards") => "Cartes",
@@ -211,7 +211,7 @@ pub(super) fn hud(game:&Game<'_>,batch:&mut HudBatch,inventory_effects:bool) {
     let all=rows(game);
     let mode=value(game,"mode","cards");
     let w0=match value(game,"width","medium").as_str() {"small"=>138.0,"large"=>202.0,_=>170.0};
-    let w=w0.min(batch.width.saturating_sub(12) as f32);
+    let w=w0.min((batch.width-12.0).max(0.0));
     if w<30.0{return;}
     let right=value(game,"side","left")=="right";
     let x=if right{batch.width as f32-w-6.0}else{6.0};
