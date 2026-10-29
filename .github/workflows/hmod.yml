@@ -143,11 +143,14 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           cp -- "$HMOD_FILE" "dist/$MOD_NAME.hmod"
+          (cd dist && sha256sum "$MOD_NAME.hmod" > "$MOD_NAME.hmod.sha256")
           echo "### $MOD_NAME : OK" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: hmod-${{ matrix.mod }}
-          path: dist/${{ matrix.mod }}.hmod
+          path: |
+            dist/${{ matrix.mod }}.hmod
+            dist/${{ matrix.mod }}.hmod.sha256
           if-no-files-found: error
 
   result:
@@ -163,3 +166,36 @@ jobs:
         run: |
           echo "scaffold=$SCAFFOLD discover=$DISCOVER build=$BUILD"
           [[ "$SCAFFOLD" == success && "$DISCOVER" == success && ( "$BUILD" == success || "$BUILD" == skipped ) ]]
+
+  publish:
+    # Only publish a binary after the complete workflow succeeds on main.
+    needs: [result, build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.result.result == 'success' && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Retrieve verified HorizonUtilities artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: hmod-HorizonUtilities
+          path: staging
+      - name: Verify checksum and publish to dist/
+        run: |
+          set -euo pipefail
+          (cd staging && sha256sum -c HorizonUtilities.hmod.sha256)
+          test -s staging/HorizonUtilities.hmod
+          mkdir -p dist
+          cp staging/HorizonUtilities.hmod dist/HorizonUtilities.hmod
+          cp staging/HorizonUtilities.hmod.sha256 dist/HorizonUtilities.hmod.sha256
+          git add -f dist/HorizonUtilities.hmod dist/HorizonUtilities.hmod.sha256
+          if git diff --cached --quiet; then
+            echo "No artifact changes" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m "build: publier HorizonUtilities.hmod validé par CI"
+          git push origin HEAD:main
+          echo "### Download: dist/HorizonUtilities.hmod" >> "$GITHUB_STEP_SUMMARY"
