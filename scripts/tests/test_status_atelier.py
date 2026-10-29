@@ -16,7 +16,8 @@ class NativeStatusAtelierTests(unittest.TestCase):
         self.assertEqual(manifest["game"], "26.3")
         self.assertNotIn("hooks", manifest)
         toml=files["mixins/status_effect_atelier/horizon-mixin.toml"].decode()
-        self.assertEqual(toml.count('kind = "OVERWRITE"'),2)
+        self.assertEqual(toml.count('kind = "HEAD"'),5)
+        self.assertEqual(toml.count("cancellable = true"),2)
         self.assertIn("draw_effect_icons",toml)
         self.assertIn("draw_inventory_effects",toml)
 
