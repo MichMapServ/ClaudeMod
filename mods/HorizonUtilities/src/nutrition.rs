@@ -1,37 +1,48 @@
 //! Nutrition logic: pure, no SDK types.
 //!
-//! The hunger level is the real one from `game::get_player`. The held food's
-//! points come from the built-in vanilla table in `food.rs`.
+//! A value the provider does not give (saturation in standard mode) stays
+//! `None` all the way to the HUD: nothing is estimated or reconstructed.
 
 use crate::food;
+use crate::provider::{FoodInfo, Vitals};
 
 /// The hunger bar's size.
 pub const MAX_FOOD: u32 = 20;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct HeldFood {
     pub item: String,
     pub points: u32,
+    pub saturation: Option<f32>,
     pub note: Option<&'static str>,
 }
 
 /// What the HUD depends on; compared to skip redundant redraws.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Snapshot {
     pub food: u32,
+    pub saturation: Option<f32>,
+    pub exhaustion: Option<f32>,
     pub held: Option<HeldFood>,
 }
 
-pub fn snapshot(food: u32, held_item: Option<&str>) -> Snapshot {
-    let held = held_item.and_then(|id| {
-        food::lookup(id).map(|f| HeldFood {
-            item: id.to_string(),
-            points: f.points,
-            note: f.note,
-        })
+/// Finite, in range and rounded to a tenth, so a float flicker is no redraw.
+fn clean(v: f32) -> Option<f32> {
+    v.is_finite()
+        .then(|| (v.clamp(0.0, 1000.0) * 10.0).round() / 10.0)
+}
+
+pub fn snapshot(vitals: &Vitals, held: Option<(&str, FoodInfo)>) -> Snapshot {
+    let held = held.map(|(id, info)| HeldFood {
+        item: id.to_string(),
+        points: info.nutrition,
+        saturation: info.saturation.and_then(clean),
+        note: food::lookup(id).and_then(|f| f.note),
     });
     Snapshot {
-        food: food.min(MAX_FOOD),
+        food: vitals.food.min(MAX_FOOD),
+        saturation: vitals.saturation.and_then(clean),
+        exhaustion: vitals.exhaustion.and_then(clean),
         held,
     }
 }
@@ -75,38 +86,61 @@ pub fn display_name(item_id: &str) -> String {
 mod tests {
     use super::*;
 
+    fn vitals(food: u32) -> Vitals {
+        Vitals {
+            food,
+            saturation: None,
+            exhaustion: None,
+        }
+    }
+
+    fn apple() -> Option<(&'static str, FoodInfo)> {
+        let info = FoodInfo {
+            nutrition: 4,
+            saturation: None,
+        };
+        Some(("minecraft:apple", info))
+    }
+
     #[test]
-    fn snapshot_keeps_only_known_foods() {
-        let s = snapshot(14, Some("minecraft:apple"));
+    fn snapshot_carries_the_held_food() {
+        let s = snapshot(&vitals(14), apple());
         assert_eq!(s.food, 14);
         assert_eq!(s.held.as_ref().map(|h| h.points), Some(4));
-        assert!(snapshot(14, Some("minecraft:stone")).held.is_none());
-        assert!(snapshot(14, None).held.is_none());
+        assert!(snapshot(&vitals(14), None).held.is_none());
+    }
+
+    #[test]
+    fn missing_saturation_stays_missing() {
+        let s = snapshot(&vitals(14), apple());
+        assert_eq!(s.saturation, None);
+        assert_eq!(s.exhaustion, None);
+        assert_eq!(s.held.and_then(|h| h.saturation), None);
+    }
+
+    #[test]
+    fn real_saturation_is_kept_and_rounded() {
+        let v = Vitals {
+            food: 18,
+            saturation: Some(4.4999),
+            exhaustion: Some(f32::NAN),
+        };
+        let s = snapshot(&v, None);
+        assert_eq!(s.saturation, Some(4.5));
+        assert_eq!(s.exhaustion, None);
     }
 
     #[test]
     fn snapshot_clamps_the_hunger_level() {
-        assert_eq!(snapshot(99, None).food, MAX_FOOD);
+        assert_eq!(snapshot(&vitals(99), None).food, MAX_FOOD);
     }
 
     #[test]
     fn preview_caps_at_twenty_and_counts_waste() {
-        assert_eq!(
-            preview(14, 4),
-            Preview {
-                current: 14,
-                after: 18,
-                wasted: 0
-            }
-        );
-        assert_eq!(
-            preview(18, 8),
-            Preview {
-                current: 18,
-                after: 20,
-                wasted: 6
-            }
-        );
+        let p = preview(14, 4);
+        assert_eq!((p.current, p.after, p.wasted), (14, 18, 0));
+        let p = preview(18, 8);
+        assert_eq!((p.current, p.after, p.wasted), (18, 20, 6));
         assert_eq!(preview(20, 5).wasted, 5);
     }
 

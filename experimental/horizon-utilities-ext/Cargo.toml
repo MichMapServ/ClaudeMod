@@ -1,0 +1,27 @@
+# Extended mode of Horizon Utilities: the same sources as mods/HorizonUtilities,
+# built with the `native` feature against the extended SDK (ENGINE_PATCH.md).
+# Not a workspace member: the fork below must exist first.
+[package]
+name = "horizon-utilities-ext"
+version = "0.3.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+path = "../../mods/HorizonUtilities/src/lib.rs"
+
+[features]
+default = ["native"]
+native = []
+
+[dependencies]
+horizon-mod-sdk = { git = "https://github.com/MichMapServ/horizon", branch = "utilities-native-api" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

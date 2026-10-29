@@ -1,7 +1,7 @@
 id = "horizon_utilities"
 name = "Horizon Utilities"
-version = "0.2.0"
-description = "Nutrition HUD, waypoints, mini-carte, alertes de survie, FPS/CPS et variations du stack tenu, sans compagnon."
+version = "0.3.0"
+description = "Nutrition, navigation, FPS/CPS, mini-carte et HUD expérimentaux; fonctionne en .hmod autonome"
 authors = ["ClaudeMod"]
 api = "0.1"
 side = "client"
