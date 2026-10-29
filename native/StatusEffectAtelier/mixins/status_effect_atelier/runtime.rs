@@ -33,7 +33,7 @@ fn value(game: &Game<'_>, key: &str, fallback: &str) -> String {
 fn on(game: &Game<'_>, key: &str, fallback: bool) -> bool {
     value(game,key,if fallback {"true"} else {"false"}) == "true"
 }
-fn enabled(game: &Game<'_>) -> bool {
+pub(super) fn enabled(game: &Game<'_>) -> bool {
     game.native_on(ID) && on(game,"enabled",true) && game.native_window()
 }
 pub(super) fn settings(game: &Game<'_>) -> Vec<String> {
