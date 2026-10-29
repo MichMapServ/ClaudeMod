@@ -21,7 +21,7 @@ const MAX_POINTS: usize = 8;
 thread_local! {
     static RECENT_PICKUP: RefCell<Option<(String, Instant)>> = const { RefCell::new(None) };
 }
-const OPTIONS: [(&str, &str, bool); 9] = [
+const OPTIONS: [(&str, &str, bool); 10] = [
     ("enabled", "HUD principal", true),
     ("nutrition", "Faim et saturation", true),
     ("alerts", "Alertes de survie", true),
@@ -61,7 +61,7 @@ fn relative_direction(yaw: f32, dx: f64, dz: f64) -> &'static str {
     let delta = (target - f64::from(yaw) + 540.0).rem_euclid(360.0) - 180.0;
     if delta.abs() <= 35.0 { "devant" }
     else if delta.abs() >= 145.0 { "derriere" }
-    else if delta < 0.0 { "droite" } else { "gauche" }
+    else if delta < 0.0 { "gauche" } else { "droite" }
 }
 pub(super) fn settings(game: &Game<'_>) -> Vec<String> {
     OPTIONS.iter().map(|(key, title, fallback)| {
