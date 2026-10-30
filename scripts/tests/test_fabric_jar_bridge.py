@@ -20,7 +20,7 @@ class FabricJarBridgePackageTests(unittest.TestCase):
         self.assertIn('target = "horizon_client::game::mods::content_root"',toml)
         self.assertIn("cancellable = true",toml)
 
-    def test_native_bridge_does_not_execute_java(self):
+    def test_resource_import_does_not_execute_java_implicitly(self):
         src=(pkg.SRC/"runtime.rs").read_text()
         self.assertIn('metadata(&mut jar)',src)
         self.assertIn('horizon_mods::content::check_path',src)
@@ -29,6 +29,19 @@ class FabricJarBridgePackageTests(unittest.TestCase):
         self.assertIn('MAX_TOTAL',src)
         self.assertNotIn('java -jar',src)
         self.assertNotIn('Command::new("java")',src)
+
+    def test_opt_in_jvm_sidecar_is_auditable_and_packaged(self):
+        manifest, files = pkg.entries()
+        self.assertEqual(manifest["version"], "0.2.0")
+        java = files["mixins/fabric_jar_bridge/java_runtime.rs"].decode()
+        self.assertIn('Command::new("java")', java)
+        self.assertIn('Command::new("javac")', java)
+        self.assertIn("fabricbridge-trusted.txt", java)
+        self.assertIn("fn trusted(", java)
+        self.assertIn("runs_actual_fabric_initializer_and_exposes_command", java)
+        toml = files["mixins/fabric_jar_bridge/horizon-mixin.toml"].decode()
+        self.assertIn('name = "fabric_java_bridge"', toml)
+        self.assertIn('source = "java_runtime.rs"', toml)
 
     def test_reproducible_archive_and_fail_closed_verification(self):
         with tempfile.TemporaryDirectory() as d:
