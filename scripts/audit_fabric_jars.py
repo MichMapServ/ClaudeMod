@@ -339,7 +339,7 @@ def audit_set(paths: list[Path]) -> list[dict]:
                 kept.append(entry)
                 continue
             try:
-                compatible = any(_predicate(dep["version"], p) for p in predicates)
+                compatible = any([_predicate(dep["version"], p) for p in predicates])  # validate every alternative
             except (ValueError, TypeError):
                 kept.append(entry)
                 issue(kept, "blocker", "unsupported_dependency_version",
