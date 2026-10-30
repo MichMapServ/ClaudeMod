@@ -1,4 +1,4 @@
-# Fabric Bridge compatibility ledger — experimental 0.3.0
+# Fabric Bridge compatibility ledger — experimental 0.4.0
 
 This file describes code actually implemented in this branch, not a universal Fabric promise.
 
@@ -12,7 +12,7 @@ This file describes code actually implemented in this branch, not a universal Fa
 | `ClientPlayerEntity.getBlockPos/getBlockX/Y/Z` | Implemented subset | Floor of real Horizon position |
 | `net.minecraft.util.math.BlockPos.getX/Y/Z` | Implemented subset | Snapshot value object |
 | `dev.horizon.fabricbridge.HorizonBridge.registerCommand` | Bridge extension | Java stdout IPC to Horizon native command handler |
-| Fabric Loader's full API and registry lifecycle | Unsupported | No resolver / registries |
+| Fabric Loader's full API and registry lifecycle | Unsupported | Partial local graph resolver only; no Fabric Loader runtime/registries |
 | Fabric API other modules (events, item groups, rendering, networking) | Unsupported | No shims or matching Horizon handlers |
 | Vanilla Java Minecraft classes beyond the listed facade | Unsupported | Horizon is implemented in Rust, not Java |
 | Yarn/intermediary/official class names for arbitrary mods | Unsupported | No bytecode remapper |
@@ -24,8 +24,8 @@ This file describes code actually implemented in this branch, not a universal Fa
 ## Architecture in this slice
 
 - Horizon native `native_tick` hook reads the real player position (client side only).
-- Bounded nonblocking Rust channel forwards events to an approved child JVM with one mod JAR on the classpath.
-- Java `Runner` initializes Fabric main/client entrypoints, then consumes player-state tick messages.
+- Bounded nonblocking Rust channel forwards events to one child JVM with a verified multi-JAR classpath ordered by supported dependency constraints.
+- Java `Runner` initializes Fabric main/client entrypoints in dependency order, then consumes player-state tick messages.
 - The minimal Java `MinecraftClient` facade is updated every tick and emits `END_CLIENT_TICK` callbacks.
 - Java callbacks can register a native command through the limited `HorizonBridge` protocol.
 - Each JAR runs with **full user OS privileges**, without a Java sandbox. Approval never means the JAR is safe.
@@ -41,3 +41,8 @@ This file describes code actually implemented in this branch, not a universal Fa
 6. **Compatibility claims:** maintain an explicit versioned per-mod matrix with real in-game Windows tests; unsupported mods must visibly report missing classes/API rather than claiming success.
 
 **Not solved by shipping Minecraft's official Java game classes:** the original game is a different game runtime with its own state and rendering. Merely loading its bytecode alongside Horizon would not make Java mods control Horizon's Rust world. Respect Minecraft and Fabric distribution licenses; do not redistribute Mojang's game binaries.
+
+## Version 0.4.0 : subset implemented
+
+- Supported: graph of local approved JARs, common JVM classpath, deterministic topological order, library-only JAR, duplicate IDs/classes guard, `depends` and `breaks`/`conflicts`, version predicates numeric `*`, exact, comparisons, caret/tilde and conjunctions.
+- Not supported: Fabric Loader language adapters, full SemVer prereleases, Fabric wildcard range syntax, nested JAR resolution, Fabric Loader API and Minecraft Java. Unsupported constraints fail closed. Approval SHA-256 per dependency remains mandatory.

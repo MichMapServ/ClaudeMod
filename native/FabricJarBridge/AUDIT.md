@@ -131,3 +131,9 @@ sur #20, qui dépend de #19 et de #18. Aucun merge automatique.
 Ces vérifications n'ajoutent ni Fabric Loader complet ni APIs Minecraft/Fabric manquantes.
 La validation ne pourra être déclarée acquise qu'après `cargo check`, tests Java/Rust
 et essais Windows réels.
+
+## Implémentation expérimentale du chargeur groupé (0.4.0)
+
+Le chargement Java par JAR a été remplacé par une **préparation globale** des JAR Fabric autorisés. Le nouveau résolveur de graphe rejette les dépendances manquantes ou non autorisées, les cycles, les conflits de version, les IDs dupliqués et les classes dupliquées. Les archives retenues sont copiées/vérifiées individuellement par SHA-256 puis placées sur un classpath JVM commun ; les initialisations Java suivent un ordre topologique stable.
+
+L'ensemble reste **un sous-ensemble expérimental** : pas de Fabric Loader complet, pas d'API Minecraft/Fabric complète, et pas de Mixins. Les contraintes de version non comprises sont des blocages de chargement et non des assertions de compatibilité. La version Minecraft virtuelle est 26.3 ; les versions explicites de Fabric Loader ou du JDK ne sont pas attestées. Une JVM démarrée n'atteste pas la réussite effective de tous les initializers.

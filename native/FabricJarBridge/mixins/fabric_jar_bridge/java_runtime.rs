@@ -129,9 +129,10 @@ fn read_entrypoints(path:&Path)->Result<(String,Vec<(String,String)>),String>{
     }
     if let Some(deps)=meta.get("depends") {
         let deps=deps.as_object().ok_or("depends doit etre un objet")?;
-        for key in deps.keys() {
-            if !matches!(key.as_str(),"minecraft"|"fabricloader"|"java") {
-                return Err(format!("dependance non prise en charge: {key}"));
+        if deps.len()>128 { return Err("trop de dependances Fabric".into()); }
+        for (name,requirement) in deps {
+            if !valid_id(name) || parse_version_requirements(requirement).is_err() {
+                return Err(format!("dependance invalide: {name}"));
             }
         }
     }
@@ -172,6 +173,209 @@ fn read_entrypoints(path:&Path)->Result<(String,Vec<(String,String)>),String>{
     }
     Ok((id.to_owned(),entries))
 }
+// A conservative subset of Fabric Loader's mod metadata and version syntax.
+// Unknown predicates fail closed; "candidate" must not mean compatible.
+#[derive(Clone)]
+struct FabricMod {
+    path: PathBuf,
+    id: String,
+    version: String,
+    hash: String,
+    entries: Vec<(String,String)>,
+    depends: BTreeMap<String,Vec<String>>,
+    breaks: BTreeMap<String,Vec<String>>,
+}
+fn parse_version_requirements(value:&serde_json::Value)->Result<Vec<String>,String> {
+    let predicates=match value {
+        serde_json::Value::String(s)=>vec![s.clone()],
+        serde_json::Value::Array(items) if !items.is_empty() && items.len()<=16=>{
+            items.iter().map(|v|v.as_str().map(str::to_owned)
+                .ok_or_else(||"version Fabric doit etre une chaine".to_owned()))
+                .collect::<Result<Vec<_>,_>>()?
+        }
+        _=>return Err("syntaxe de version Fabric invalide".into()),
+    };
+    if predicates.iter().any(|s|s.len()>160 || s.is_empty()) {
+        return Err("predicat de version Fabric trop long ou vide".into());
+    }
+    Ok(predicates)
+}
+fn metadata_dependencies(path:&Path)->Result<(String,BTreeMap<String,Vec<String>>,BTreeMap<String,Vec<String>>),String>{
+    let mut zip=ZipArchive::new(File::open(path).map_err(|e|e.to_string())?)
+        .map_err(|e|e.to_string())?;
+    let entry=zip.by_name("fabric.mod.json").map_err(|e|e.to_string())?;
+    if entry.size()>65536 { return Err("manifest trop volumineux".into()); }
+    let mut bytes=Vec::new();
+    entry.take(65537).read_to_end(&mut bytes).map_err(|e|e.to_string())?;
+    let meta:serde_json::Value=serde_json::from_slice(&bytes).map_err(|e|e.to_string())?;
+    let version=meta.get("version").and_then(|v|v.as_str())
+        .ok_or("version Fabric absente ou invalide")?;
+    if version.len()>100 || version.is_empty() {return Err("version Fabric invalide".into());}
+    let mut groups=Vec::new();
+    for key in ["depends","breaks","conflicts"] {
+        let mut out=BTreeMap::new();
+        if let Some(value)=meta.get(key) {
+            let entries=value.as_object().ok_or_else(||format!("{key} doit etre un objet"))?;
+            if entries.len()>128 {return Err(format!("{key}: trop d'entrees"));}
+            for (id,requirement) in entries {
+                if !valid_id(id) {return Err(format!("identifiant {key} invalide: {id}"));}
+                out.insert(id.clone(),parse_version_requirements(requirement)?);
+            }
+        }
+        groups.push(out);
+    }
+    let mut breaks=groups.remove(1);
+    breaks.extend(groups.pop().unwrap_or_default());
+    Ok((version,groups.remove(0),breaks))
+}
+// Fabric supports more version predicates than this small bridge. Reject
+// unknown syntax instead of silently considering a missing API compatible.
+fn numeric_version(s:&str)->Result<[u64;3],String> {
+    let body=s.split('+').next().unwrap_or(s);
+    if body.is_empty() || body.contains('-') {
+        return Err(format!("version non numerique ou prerelease: {s}"));
+    }
+    let parts=body.split('.').collect::<Vec<_>>();
+    if parts.is_empty() || parts.len()>3 || parts.iter().any(|p|p.is_empty()||!p.bytes().all(|b|b.is_ascii_digit())) {
+        return Err(format!("version non prise en charge: {s}"));
+    }
+    let mut value=[0u64;3];
+    for (index,component) in parts.iter().enumerate() {
+        value[index]=component.parse().map_err(|_|format!("version hors limites: {s}"))?;
+    }
+    Ok(value)
+}
+fn version_predicate(actual:&str,predicate:&str)->Result<bool,String>{
+    let s=predicate.trim();
+    if s=="*" {return Ok(true);}
+    if s.contains("||") || s.contains('*') {
+        return Err(format!("version Fabric: predicat non pris en charge: {s}"));
+    }
+    // Plain space-separated comparators form an AND expression.
+    let components=s.split_whitespace().collect::<Vec<_>>();
+    if components.len()>1 {
+        return components.iter().try_fold(true,|ok,p|Ok(ok && version_predicate(actual,p)?));
+    }
+    let (operator,expected)=["<=",">=","==","=","<",">","^","~"].iter()
+        .find_map(|op|s.strip_prefix(op).map(|rest|(*op,rest)))
+        .unwrap_or(("=",s));
+    let left=numeric_version(actual)?;
+    let right=numeric_version(expected)?;
+    match operator {
+        "="|"=="=>Ok(left==right),
+        ">"=>Ok(left>right),
+        "<"=>Ok(left<right),
+        ">="=>Ok(left>=right),
+        "<="=>Ok(left<=right),
+        "^"=>{
+            let mut upper=right;
+            let i=if right[0]>0 {0} else if right[1]>0 {1} else {2};
+            upper[i]=upper[i].checked_add(1).ok_or("version deborde")?;
+            for digit in &mut upper[i+1..] {*digit=0;}
+            Ok(left>=right && left<upper)
+        }
+        "~"=>{
+            let mut upper=right;
+            let i=if expected.contains('.') {1} else {0};
+            upper[i]=upper[i].checked_add(1).ok_or("version deborde")?;
+            for digit in &mut upper[i+1..] {*digit=0;}
+            Ok(left>=right && left<upper)
+        }
+        _=>Err("predicat inconnu".into()),
+    }
+}
+fn version_matches(actual:&str,requirements:&[String])->Result<bool,String>{
+    // Fabric's array of predicates is an OR, not an AND.
+    let mut has_match=false;
+    for r in requirements {has_match |= version_predicate(actual,r)?;}
+    Ok(has_match)
+}
+fn plan_mods(mods:&[FabricMod])->(Vec<usize>,Vec<Option<String>>){
+    let mut failures=vec![None;mods.len()];
+    let mut by_id=BTreeMap::<String,usize>::new();
+    for (i,m) in mods.iter().enumerate() {
+        if let Some(previous)=by_id.insert(m.id.clone(),i) {
+            failures[i]=Some(format!("ID Fabric duplique: {}",m.id));
+            failures[previous]=Some(format!("ID Fabric duplique: {}",m.id));
+        }
+    }
+    for (i,m) in mods.iter().enumerate() {
+        for (id,predicates) in &m.breaks {
+            if let Some(&other)=by_id.get(id) {
+                match version_matches(&mods[other].version,predicates) {
+                    Ok(true)=>failures[i]=Some(format!("incompatibilite Fabric: {} bloque {}",m.id,id)),
+                    Err(e)=>failures[i]=Some(format!("conflit Fabric non verifiable: {e}")),
+                    Ok(false)=>{},
+                }
+            }
+        }
+        for (id,predicates) in &m.depends {
+            let version=match id.as_str() {
+                "minecraft"=>Some("26.3"),
+                // Horizon does not embed Fabric Loader. Wildcard is treated
+                // as a shim capability only; declared Loader versions cannot
+                // be claimed as satisfied.
+                "fabricloader"|"java"=>None,
+                _=>by_id.get(id).map(|&n|mods[n].version.as_str()),
+            };
+            if version.is_none() {
+                if matches!(id.as_str(),"fabricloader"|"java")
+                    && predicates.len()==1 && predicates[0]=="*" {
+                    continue;
+                }
+                failures[i]=Some(format!("dependance absente ou version non verifiable: {id}"));
+                break;
+            }
+            match version_matches(version.unwrap_or_default(),predicates) {
+                Ok(true)=>{},
+                Ok(false)=>{failures[i]=Some(format!("version incompatible: {id} ({})",version.unwrap_or_default()));break;}
+                Err(e)=>{failures[i]=Some(format!("contrainte {id} non prise en charge: {e}"));break;}
+            }
+        }
+    }
+    let mut order=Vec::new();
+    let mut placed=HashSet::new();
+    for _ in 0..mods.len() {
+        let mut progress=false;
+        for (i,m) in mods.iter().enumerate() {
+            if failures[i].is_some() || placed.contains(&i) {continue;}
+            if m.depends.keys().filter_map(|k|by_id.get(k))
+                .all(|dep|placed.contains(dep)) {
+                placed.insert(i);order.push(i);progress=true;
+            }
+        }
+        if !progress {break;}
+    }
+    for (i,m) in mods.iter().enumerate() {
+        if failures[i].is_none() && !placed.contains(&i) {
+            failures[i]=Some(format!("cycle de dependances ou dependance bloquee: {}",m.id));
+        }
+    }
+    (order,failures)
+}
+fn class_collisions(paths:&[PathBuf])->Result<(),String>{
+    let mut known=HashSet::new();
+    for path in paths {
+        let mut z=ZipArchive::new(File::open(path).map_err(|e|e.to_string())?)
+            .map_err(|e|e.to_string())?;
+        for name in z.file_names() {
+            if name.ends_with(".class") && !known.insert(name.to_owned()) {
+                return Err(format!("classe Java dupliquee dans le classpath: {name}"));
+            }
+            if name.starts_with("dev/horizon/fabricbridge/")
+                || name.starts_with("net/fabricmc/api/")
+                || name.starts_with("net/minecraft/client/")
+                || name=="net/minecraft/util/math/BlockPos.class"
+                || name.starts_with("net/fabricmc/fabric/api/client/event/lifecycle/v1/") {
+                if name.ends_with(".class") {
+                    return Err(format!("classe reservee par les shims Horizon: {name}"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn sha(path:&Path)->Result<String,String>{
     let mut file=File::open(path).map_err(|e|e.to_string())?;
     let mut hash=Sha256::new();
@@ -417,16 +621,32 @@ fn parse_command(line:&str)->Option<(String,String)>{
         || reply.len()>720 || reply.chars().any(|c|c.is_control()) {return None;}
     Some((name.to_owned(),reply.to_owned()))
 }
+#[allow(dead_code)]
 fn execute(jar:&Path,entries:&[(String,String)])->Result<(),String>{
+    execute_group(&[(jar.to_path_buf(),entries.to_vec())])
+}
+fn execute_group(mods:&[(PathBuf,Vec<(String,String)>)])->Result<(),String>{
+    if mods.is_empty() || mods.iter().all(|(_,e)|e.is_empty()) {
+        return Err("aucun entrypoint Java executable".into());
+    }
     let classes=shim()?;
     let separator=if cfg!(windows){';'}else{':'};
-    if classes.to_string_lossy().contains(separator) || jar.to_string_lossy().contains(separator) {
-        return Err("chemin JVM contenant un separateur classpath: execution refusee".into());
+    let mut classpath=vec![classes.display().to_string()];
+    for (jar,_) in mods {
+        if jar.to_string_lossy().contains(separator) {
+            return Err("chemin JVM contenant un separateur classpath: execution refusee".into());
+        }
+        classpath.push(jar.display().to_string());
     }
-    let classpath=format!("{}{}{}",classes.display(),separator,jar.display());
+    if classpath[0].contains(separator) {
+        return Err("chemin JVM shim contenant un separateur classpath".into());
+    }
     let mut cmd=Command::new("java");
-    cmd.arg("-cp").arg(&classpath).arg("dev.horizon.fabricbridge.Runner");
-    for (kind,class) in entries {cmd.arg(kind).arg(class);}
+    cmd.arg("-cp").arg(classpath.join(&separator.to_string()))
+        .arg("dev.horizon.fabricbridge.Runner");
+    for (_,entries) in mods {
+        for (kind,class) in entries {cmd.arg(kind).arg(class);}
+    }
     let mut child=cmd.stdin(Stdio::piped()).stdout(Stdio::piped())
         .stderr(Stdio::inherit()).spawn().map_err(|e|format!("Java non disponible: {e}"))?;
     let stdin=child.stdin.take().ok_or("stdin JVM indisponible")?;
@@ -499,33 +719,102 @@ pub fn tick(position:Option<[f64;3]>) {
         });
     }
 }
-pub fn inspect_and_run(jar:&Path)->String{
-    let (id,entries)=match read_entrypoints(jar){
-        Ok(x)=>x,Err(e)=>return format!("Java: {e}"),
-    };
-    if entries.is_empty(){return "Java: pas d'entrypoint main/client compatible".into();}
-    let hash=match sha(jar){Ok(x)=>x,Err(e)=>return format!("SHA-256: {e}")};
-    if let Ok(mut s)=state().lock(){s.found.push(Found{id:id.clone(),sha:hash.clone()});}
-    if !trusted(&id,&hash) {
-        return format!("Java NON execute (securite). /fabricbridge trust {id}, puis redemarrage");
+// Discover all archives before executing any of them. This is required for
+// cross-JAR dependencies and deterministic initialization order.
+pub fn inspect_and_run_all(jars:&[PathBuf])->Vec<String>{
+    let mut reports=vec![String::new();jars.len()];
+    let mut candidates=Vec::<(usize,FabricMod)>::new();
+    let mut seen=BTreeMap::<String,usize>::new();
+    for (i,jar) in jars.iter().enumerate() {
+        let (id,entries)=match read_entrypoints(jar){
+            Ok(value)=>value,
+            Err(e)=>{reports[i]=format!("Java refuse: {e}");continue;}
+        };
+        let (version,depends,breaks)=match metadata_dependencies(jar) {
+            Ok(value)=>value,
+            Err(e)=>{reports[i]=format!("Java refuse: {e}");continue;}
+        };
+        let hash=match sha(jar) {
+            Ok(value)=>value,
+            Err(e)=>{reports[i]=format!("Java refuse SHA-256: {e}");continue;}
+        };
+        if let Ok(mut s)=state().lock() {
+            s.found.push(Found{id:id.clone(),sha:hash.clone()});
+        }
+        if let Some(previous)=seen.insert(id.clone(),i) {
+            reports[previous]=format!("Java refuse: ID duplique: {id}");
+            reports[i]=format!("Java refuse: ID duplique: {id}");
+            continue;
+        }
+        if !trusted(&id,&hash) {
+            reports[i]=format!("Java NON execute. /fabricbridge trust {id}, puis redemarrage");
+            continue;
+        }
+        candidates.push((i,FabricMod{path:jar.clone(),id,version,hash,entries,depends,breaks}));
+    }
+    // A duplicate ID in an untrusted archive still poisons that identity.
+    candidates.retain(|(i,m)|{
+        if reports[*i].starts_with("Java refuse: ID duplique") {return false;}
+        if seen.get(&m.id)!=Some(i) {
+            reports[*i]=format!("Java refuse: ID Fabric duplique: {}",m.id);
+            return false;
+        }
+        true
+    });
+    let models=candidates.iter().map(|(_,m)|m.clone()).collect::<Vec<_>>();
+    let (order,failures)=plan_mods(&models);
+    for (n,issue) in failures.iter().enumerate() {
+        if let Some(e)=issue {reports[candidates[n].0]=format!("Java refuse: {e}");}
+    }
+    if order.is_empty() {
+        for r in &mut reports {if r.is_empty(){*r="Java: aucun entrypoint charge".into();}}
+        return reports;
     }
     let cache=std::env::current_dir().unwrap_or_default()
         .join(".horizon-cache/fabric-jar-bridge/java-approved");
-    let snapshot=match approved_snapshot(jar,&hash,&cache) {
-        Ok(file)=>file,Err(e)=>return format!("Java refuse (copie verifiee): {e}"),
-    };
-    // Do not trust entrypoints read before snapshotting; a replacement JAR
-    // might have been swapped in between the first read and SHA-256.
-    let (snapshot_id,snapshot_entries)=match read_entrypoints(&snapshot) {
-        Ok(value)=>value,Err(e)=>return format!("Java refuse (copie invalide): {e}"),
-    };
-    if snapshot_id!=id || snapshot_entries!=entries {
-        return "Java refuse: metadonnees changees pendant la verification".into();
+    let mut loaded=Vec::new();
+    let mut selected=Vec::new();
+    for &idx in &order {
+        let mod_info=&models[idx];
+        let snapshot=match approved_snapshot(&mod_info.path,&mod_info.hash,&cache) {
+            Ok(s)=>s,Err(e)=>{
+                for &j in &order {reports[candidates[j].0]=format!("Java refuse (groupe incomplet): {e}");}
+                return reports;
+            }
+        };
+        let info=read_entrypoints(&snapshot);
+        let dependencies=metadata_dependencies(&snapshot);
+        let same=matches!(info,Ok((ref id,ref entries)) if id==&mod_info.id && entries==&mod_info.entries)
+            && matches!(dependencies,Ok((ref version,ref depends,ref breaks))
+                if version==&mod_info.version && depends==&mod_info.depends && breaks==&mod_info.breaks);
+        if !same {
+            for &j in &order {reports[candidates[j].0]="Java refuse: metadonnees JAR incoherentes".into();}
+            return reports;
+        }
+        selected.push(candidates[idx].0);
+        loaded.push((snapshot,mod_info.entries.clone()));
     }
-    match execute(&snapshot,&snapshot_entries){
-        Ok(())=>format!("JVM lancee: {} entrypoint(s), ClientTickEvents.END_CLIENT_TICK actif (si enregistre)",entries.len()),
-        Err(e)=>format!("Java echec/incompatibilite: {e}"),
+    if let Err(e)=class_collisions(&loaded.iter().map(|(p,_)|p.clone()).collect::<Vec<_>>()) {
+        for &i in &selected {reports[i]=format!("Java refuse: {e}");}
+        return reports;
     }
+    if loaded.iter().all(|(_,eps)|eps.is_empty()){
+        for &i in &selected {reports[i]="Java: dependance chargeable, aucun initializer".into();}
+        return reports;
+    }
+    match execute_group(&loaded) {
+        Ok(())=>{
+            let count=loaded.iter().map(|(_,e)|e.len()).sum::<usize>();
+            for &i in &selected {
+                reports[i]=format!("JVM partagee demarree ({} JARs, {count} entrypoint(s)); initialisation non garantie",loaded.len());
+            }
+        }
+        Err(e)=>{
+            for &i in &selected {reports[i]=format!("Java echec/incompatibilite: {e}");}
+        }
+    }
+    for r in &mut reports {if r.is_empty(){*r="Java: non charge".into();}}
+    reports
 }
 
 #[cfg(test)]
@@ -547,7 +836,6 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         for (name,manifest,extra,expected) in [
             ("mixin",r#"{"id":"mixin","entrypoints":{"main":["x.Mod"]},"mixins":["x.mixins.json"]}"#,None,"mixins Fabric"),
-            ("depends",r#"{"id":"depends","entrypoints":{"main":["x.Mod"]},"depends":{"fabric-api":"*"}}"#,None,"dependance non prise"),
             ("widener",r#"{"id":"widener","entrypoints":{"main":["x.Mod"]},"accessWidener":"some.accesswidener"}"#,None,"accessWidener"),
             ("nested",r#"{"id":"nested","entrypoints":{"main":["x.Mod"]},"jars":[{"file":"META-INF/jarjar/embedded.jar"}]}"#,None,"embarques"),
             ("traversal",r#"{"id":"traversal","entrypoints":{"main":["x.Mod"]}}"#,Some("../evil.class"),"nom de fichier JAR"),
@@ -621,6 +909,105 @@ mod tests {
         fs::write(&dest,b"cache tampered").unwrap();
         assert!(approved_snapshot(&original,&expected,&root.join("cache")).is_err());
         let _=fs::remove_dir_all(&root);
+    }
+    fn test_model(id:&str,version:&str,deps:&[(&str,&str)])->FabricMod {
+        FabricMod{
+            path:PathBuf::new(),id:id.into(),version:version.into(),hash:String::new(),
+            entries:vec![("main".into(),format!("{id}.Main"))],
+            depends:deps.iter().map(|(k,v)|((*k).into(),vec![(*v).into()])).collect(),
+            breaks:BTreeMap::new(),
+        }
+    }
+    #[test]
+    fn resolves_topological_order_and_versions(){
+        let root=test_model("consumer","2.1.0",&[("library",">=1.2.0 <2.0.0")]);
+        let lib=test_model("library","1.7.0",&[]);
+        let (order,issues)=plan_mods(&[root,lib]);
+        assert_eq!(order,vec![1,0]);assert!(issues.iter().all(Option::is_none));
+        let (order,issues)=plan_mods(&[
+            test_model("consumer","2.1",&[("library","^2.0")]),test_model("library","1.7",&[])
+        ]);
+        assert_eq!(order,vec![1]);
+        assert!(issues[0].as_ref().unwrap().contains("incompatible"));
+        assert!(version_predicate("1.9.5",">=1.8 <2").unwrap());
+        assert!(!version_predicate("2.0.0","^1.2.3").unwrap());
+        assert!(version_predicate("1.2.9","~1.2.3").unwrap());
+        assert!(version_predicate("1.3.0","~1.2.3").is_ok_and(|b|!b));
+    }
+    #[test]
+    fn blocks_missing_cycles_conflicts_and_unknown_ranges(){
+        let (order,errors)=plan_mods(&[
+            test_model("alpha","1.0",&[("beta","*")]),
+            test_model("beta","1.0",&[("alpha","*")]),
+            test_model("gamma","1.0",&[]),
+        ]);
+        assert_eq!(order,vec![2]);
+        assert!(errors[0].as_ref().unwrap().contains("cycle"));
+        assert!(errors[1].as_ref().unwrap().contains("cycle"));
+        let (order,errors)=plan_mods(&[
+            test_model("consumer","1",&[("absent","*")]),
+            test_model("independent","1",&[])
+        ]);
+        assert_eq!(order,vec![1]);
+        assert!(errors[0].as_ref().unwrap().contains("absente"));
+        let mut m=test_model("incompatible","1",&[]);
+        m.breaks.insert("independent".into(),vec!["*".into()]);
+        let (_,errors)=plan_mods(&[m,test_model("independent","1",&[])]);
+        assert!(errors[0].as_ref().unwrap().contains("bloque"));
+        assert!(version_predicate("1.1","1.0.x").is_err());
+        assert!(version_predicate("1.1",">=1.0 || <2.0").is_err());
+        assert!(version_predicate("1.0.0-beta",">=1").is_err());
+    }
+    #[test]
+    fn real_java_classpath_resolves_library_jar(){
+        if Command::new("javac").arg("-version").output().is_err(){return;}
+        let dir=std::env::temp_dir().join(format!("fabricbridge-group-test-{}",std::process::id()));
+        let _=fs::remove_dir_all(&dir);
+        let src=dir.join("sources");let classes=dir.join("classes");
+        fs::create_dir_all(&classes).unwrap();
+        let mut files=Vec::new();
+        for (name,code) in shim_files().into_iter().chain([
+            ("library/Helper.java",
+                "package library; public final class Helper {public static String hello(){return \"dep-loaded\";}}"),
+            ("proof/GroupMod.java",r#"package proof;
+public class GroupMod implements net.fabricmc.api.ModInitializer {
+    public void onInitialize() {
+        dev.horizon.fabricbridge.HorizonBridge.registerCommand("groupok",library.Helper.hello());
+    }
+}"#)
+        ]) {
+            let path=src.join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path,code).unwrap();files.push(path);
+        }
+        let output=Command::new("javac").arg("-d").arg(&classes).args(files).output().unwrap();
+        assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+        for (name,id,code,dependency) in [
+            ("library","library","library/Helper.class",false),
+            ("consumer","consumer","proof/GroupMod.class",true),
+        ] {
+            let mut z=ZipWriter::new(File::create(dir.join(format!("{name}.jar"))).unwrap());
+            z.start_file("fabric.mod.json",SimpleFileOptions::default()).unwrap();
+            let manifest=if dependency {
+                r#"{"id":"consumer","version":"1.0.0","depends":{"library":">=1.0"},"entrypoints":{"main":["proof.GroupMod"]}}"#
+            } else {
+                r#"{"id":"library","version":"1.2.0"}"#
+            };
+            z.write_all(manifest.as_bytes()).unwrap();
+            z.start_file(code,SimpleFileOptions::default()).unwrap();
+            z.write_all(&fs::read(classes.join(code)).unwrap()).unwrap();
+            z.finish().unwrap();
+            let (actual,_) = read_entrypoints(&dir.join(format!("{name}.jar"))).unwrap();
+            assert_eq!(actual,id);
+        }
+        let sep=if cfg!(windows){';'}else{':'};
+        let cp=format!("{}{}{}{}{}",classes.display(),sep,
+            dir.join("library.jar").display(),sep,dir.join("consumer.jar").display());
+        let output=Command::new("java").arg("-cp").arg(cp).arg("dev.horizon.fabricbridge.Runner")
+            .arg("main").arg("proof.GroupMod").output().unwrap();
+        assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("HBR1\tgroupok\tdep-loaded"));
+        let _=fs::remove_dir_all(dir);
     }
     #[test]
     fn bounded_jdk_output_does_not_deadlock_on_large_pipes(){
