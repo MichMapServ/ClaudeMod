@@ -420,6 +420,9 @@ fn parse_command(line:&str)->Option<(String,String)>{
 fn execute(jar:&Path,entries:&[(String,String)])->Result<(),String>{
     let classes=shim()?;
     let separator=if cfg!(windows){';'}else{':'};
+    if classes.to_string_lossy().contains(separator) || jar.to_string_lossy().contains(separator) {
+        return Err("chemin JVM contenant un separateur classpath: execution refusee".into());
+    }
     let classpath=format!("{}{}{}",classes.display(),separator,jar.display());
     let mut cmd=Command::new("java");
     cmd.arg("-cp").arg(&classpath).arg("dev.horizon.fabricbridge.Runner");
