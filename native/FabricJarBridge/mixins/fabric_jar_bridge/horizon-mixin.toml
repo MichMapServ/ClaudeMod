@@ -1,6 +1,6 @@
 [mod]
 id = "fabric_jar_bridge"
-version = "0.2.0"
+version = "0.3.0"
 priority = 120
 
 [compatibility]
@@ -50,4 +50,15 @@ bindings = [
   { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
   { name = "command", ty = "&str", value = "command" },
   { name = "ran", ty = "&mut bool", value = "&mut *ran" },
+]
+
+# The hook runs on every Horizon native game tick; only the window game
+# sends events, never the singleplayer server's own Game instance.
+[[injection]]
+id = "java-client-tick"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_tick"
+helper = "tick.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
 ]
