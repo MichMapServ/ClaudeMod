@@ -2,7 +2,7 @@
 // A limited MinecraftClient/player position facade and END_CLIENT_TICK event
 // are backed by real Horizon native tick hooks. No general Fabric/Minecraft/Mixin support.
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     fs::{self, File},
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
@@ -70,8 +70,28 @@ fn valid_class(s:&str)->bool {
         && s.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'.'||b==b'_'||b==b'$')
 }
 fn read_entrypoints(path:&Path)->Result<(String,Vec<(String,String)>),String>{
+    if fs::metadata(path).map_err(|e|e.to_string())?.len()>128*1024*1024{
+        return Err("JAR depasse 128 MiB".into());
+    }
     let mut archive=ZipArchive::new(File::open(path).map_err(|e|e.to_string())?)
         .map_err(|e|e.to_string())?;
+    if archive.len()>4096 {return Err("plus de 4096 fichiers JAR".into());}
+    let mut names=HashSet::new();
+    for index in 0..archive.len(){
+        let entry=archive.by_index(index).map_err(|e|e.to_string())?;
+        let name=entry.name();
+        let path_ok = !name.is_empty() && name.len()<=512 && !name.starts_with('/')
+            && !name.contains('\\') && !name.contains(':') && !name.contains('\0')
+            && name.trim_end_matches('/').split('/').all(|part|!part.is_empty()&&part!="."&&part!="..");
+        if !path_ok {return Err("nom de fichier JAR non sur".into());}
+        if !names.insert(name.to_owned()) {return Err("entree ZIP dupliquee".into());}
+        if entry.unix_mode().is_some_and(|mode| mode & 0o170000 == 0o120000){
+            return Err("lien symbolique refuse dans JAR".into());
+        }
+        if name.ends_with(".class") && entry.size()>16*1024*1024{
+            return Err("classe Java individuelle trop volumineuse".into());
+        }
+    }
     let mut text=String::new();
     let file=archive.by_name("fabric.mod.json").map_err(|_|"fabric.mod.json absent".to_owned())?;
     if file.size()>65536 {return Err("manifest trop volumineux".into());}
@@ -82,6 +102,7 @@ fn read_entrypoints(path:&Path)->Result<(String,Vec<(String,String)>),String>{
     // Fail closed: a successfully opened JAR is not necessarily runnable.
     // Mixins target Java Minecraft classes that do not exist in Horizon Rust;
     // access wideners and nested libraries cannot be silently ignored either.
+    if !meta.is_object(){return Err("fabric.mod.json doit etre un objet".into());}
     if meta["environment"].as_str()==Some("server") {
         return Err("mod serveur uniquement: instance native cliente".into());
     }
