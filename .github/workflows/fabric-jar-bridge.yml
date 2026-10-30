@@ -117,12 +117,40 @@ jobs:
         run: |
           cargo test --locked --no-default-features -p horizon-client --bin horizon-client fabric_jar_bridge::tests
           cargo test --locked --no-default-features -p horizon-client --bin horizon-client fabric_java_bridge::tests
+  windows-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Validate Fabric JAR package and Java proof on Windows
+        shell: pwsh
+        run: |
+          python -m unittest discover -s scripts/tests -p 'test_fabric_jar_bridge.py' -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s scripts/tests -p 'test_fabric_jar_audit.py' -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/build_fabric_jar_bridge.py pack
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/build_fabric_jar_bridge.py verify
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/build_fabric_bridge_demo.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/audit_fabric_jars.py dist/FabricBridgeJavaProof.jar --json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   gate:
     if: always()
-    needs: [package, native]
+    needs: [package, native, windows-smoke]
     runs-on: ubuntu-latest
     steps:
       - env:
           PACKAGE: ${{ needs.package.result }}
           NATIVE: ${{ needs.native.result }}
-        run: test "$PACKAGE" = success && test "$NATIVE" = success
+          WINDOWS: ${{ needs.windows-smoke.result }}
+        run: test "$PACKAGE" = success && test "$NATIVE" = success && test "$WINDOWS" = success
