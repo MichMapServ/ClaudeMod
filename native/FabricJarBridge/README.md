@@ -1,8 +1,8 @@
-# Fabric Jar Bridge — experimental Java execution 0.2.0
+# Fabric Jar Bridge — experimental Java execution 0.3.0
 
 **Scope:** put a local `.jar` in the **built native instance's** `horizon-mods/` directory and **restart the native game**. This bridge detects Fabric metadata and carries compatible *assets and data* into Horizon's content overlay automatically at game startup. The generated cache is `.horizon-cache/fabric-jar-bridge/*.hmod` and uses immutable SHA-256 based names.
 
-**Experimental Java sidecar, not a full Fabric Loader.** Version 0.2.0 can invoke actual Java `main` and `client` Fabric entrypoint bytecode after an explicit SHA-256 per-JAR opt-in. A deliberately minimal Java shim implements `net.fabricmc.api.ModInitializer`, `ClientModInitializer` and `dev.horizon.fabricbridge.HorizonBridge.registerCommand`. Most real mods will fail because Minecraft's Java classes, Fabric API modules, Mixins, class mappings, and mod dependencies are not implemented. Do not claim compatibility with Sodium, Jade, AppleSkin etc. The launcher mod browser is unchanged.
+**Experimental Java sidecar, not a full Fabric Loader.** Version 0.3.0 can invoke actual Java `main` and `client` Fabric entrypoint bytecode after an explicit SHA-256 per-JAR opt-in. A deliberately minimal Java shim implements `net.fabricmc.api.ModInitializer`, `ClientModInitializer` and `dev.horizon.fabricbridge.HorizonBridge.registerCommand`. Most real mods will still fail: this build adds only an **extremely small** facade for `MinecraftClient.getInstance().player`, the player's `getX/getY/getZ/getBlockPos`, and `ClientTickEvents.END_CLIENT_TICK`, backed by real Horizon ticks and player coordinates. Almost all other Minecraft Java classes, Fabric API modules, Mixins, mappings and mod dependencies remain unsupported. Do not claim compatibility with Sodium, Jade, AppleSkin etc. The launcher mod browser is unchanged.
 
 ## Why this implementation
 
@@ -14,7 +14,7 @@ Horizon already has a separate upstream `horizon-port-pack` utility (`crates/hor
 - Horizon source: `8474ac55c9f6f581e2bb984af9efcb18666bdbb2` (**exact source revision**, required by startup hook)
 - Horizon Mixins: `3f99a5c60dfa311cc365524c44ae2fd799bfa1de`
 - Rust: **1.99.1** in the native client build
-- Client-side instance; optional separate local JDK 11+ sidecar process, not a Java server
+- Client-side instance; optional persistent local JDK 11+ sidecar JVM, not a Java server
 
 ## Capabilities
 
@@ -24,7 +24,7 @@ Horizon already has a separate upstream `horizon-port-pack` utility (`crates/hor
 4. Uses Horizon's own `Content::read` validation and namespace conflict check and builds **one combined resource overlay**, retaining standard enabled `.hmod` content.
 5. Reports ignored `.class` files for the resource importer; the separate, opt-in Java runner can invoke supported real Fabric entrypoint bytecode.
 6. Detects changes by SHA-256 of the JAR and writes stable cache filenames; no generated content is committed to GitHub.
-7. With explicit approval per exact SHA-256, starts a separate local Java process and invokes Fabric `main`/`client` entrypoints. A mod can register a real Horizon chat command using the tiny bridge API.
+7. With explicit approval per exact SHA-256, starts a persistent separate local Java process and invokes Fabric `main`/`client` entrypoints. A mod can register a real Horizon chat command using the tiny bridge API.
 
 Safety caps: max JAR 128 MiB, 4096 entries, max copied file 8 MiB, max 64 MiB content, compression ratio cap, rejected symlinks, invalid archive paths, duplicate content paths and forbidden namespace overrides. Original JARs are never modified.
 
@@ -61,6 +61,12 @@ The bridge is independent of HorizonUtilities and Status Effect Atelier. No laun
 
 ## Supported Java API, limitations and safety
 
-`dev.horizon.fabricbridge.HorizonBridge.registerCommand(String command, String reply)` is **an experimental API for bridge-aware Fabric mods**, not an official Fabric API method. A mod must have an ordinary public, no-argument `ModInitializer` or `ClientModInitializer` class. The runner invokes each entrypoint in a **short-lived separate JVM** and captures its command registrations; it does not keep a JVM alive for ticks/events or support Fabric Loader APIs, Mixins, Java Minecraft internals, rendering, game registry mutation, dependencies or Java's other loader adapters.
+`dev.horizon.fabricbridge.HorizonBridge.registerCommand(String command, String reply)` is **an experimental API for bridge-aware Fabric mods**, not an official Fabric API method. A mod must have an ordinary public, no-argument `ModInitializer` or `ClientModInitializer` class. The runner invokes the `main` and `client` entrypoints **in a persistent separate JVM per JAR** and collects command registrations asynchronously. Each Horizon client tick is sent through a nonblocking bounded Rust channel, carrying real player coordinates. The Java side exposes `net.minecraft.client.MinecraftClient.getInstance().player`, a small `ClientPlayerEntity` with position getters and `BlockPos`, and `net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents.END_CLIENT_TICK.register(callback)`. These are **partial API shims**, not Minecraft Java classes or the full Fabric API. There are no Mixins, renderer hooks, inventory, registry mutation, Fabric Loader modules, ordinary dependency resolution or Minecraft Java internals.
 
-Run `/fabricbridge trust <id>` only for personally verified JARs; the user explicitly grants that exact JAR **arbitrary local code execution**, including filesystem and network access. Java is not sandboxed. The bridge enforces a startup timeout but that is not a security boundary. The exact SHA-256 approval prevents a modified JAR from silently inheriting approval. This experiment is independent of the ordinary assets/data carry path. For full compatibility, a stable process/event IPC layer and extensive Minecraft/Fabric API shims must still be implemented.
+Run `/fabricbridge trust <id>` only for personally verified JARs; the user explicitly grants that exact JAR **arbitrary local code execution**, including filesystem and network access. Java is not sandboxed. JVM output and event queues are bounded where possible, but this is not a security boundary; a trusted JAR has arbitrary user-level privileges. The exact SHA-256 approval prevents a modified JAR from silently inheriting approval. This experiment is independent of the ordinary assets/data carry path. For full compatibility, a stable process/event IPC layer and extensive Minecraft/Fabric API shims must still be implemented.
+
+## Java tick/position proof (0.3.0)
+
+The `FabricBridgeJavaProof.jar` generated by `python3 scripts/build_fabric_bridge_demo.py` now contains **two actual Java entrypoints**: `proof.JavaProof` (main) and `proof.ClientTickProof` (client). The second registers a real `ClientTickEvents.END_CLIENT_TICK` callback and reads `MinecraftClient.getInstance().player.getBlockPos()`, populated each game tick by Horizon's `native_player()` hook. `/javapos` responds with the first player's actual block coordinates recorded after the callback runs (not a permanently updating command). `/javaproof` confirms Java initializer execution. Install a JDK, opt in via `/fabricbridge trust fabricbridge_demo`, and restart. Type `/javapos` after entering a world; this is not expected to work in the main menu. The built-in JVM unit test uses coordinates `(10.9,64.25,-3.7)` and verifies that Java returns block coords `(10,64,-4)`.
+
+**This does not make arbitrary Fabric mods compatible.** Most require the real Minecraft Java implementation, runtime class names/mappings, Fabric Loader state, full Fabric API and Mixin bytecode transformation. The listed facade is a minimal first event and state synchronization bridge.
