@@ -18,7 +18,6 @@ const MAX_ENTRYPOINTS: usize = 8;
 const MAX_COMMANDS: usize = 32;
 #[derive(Clone)]
 struct Found { id: String, sha: String }
-#[derive(Default)]
 struct JavaProcess { child: Child, send: SyncSender<String> }
 #[derive(Default)]
 struct State {
@@ -80,6 +79,32 @@ fn read_entrypoints(path:&Path)->Result<(String,Vec<(String,String)>),String>{
     let meta:serde_json::Value=serde_json::from_str(&text).map_err(|e|e.to_string())?;
     let id=meta["id"].as_str().unwrap_or("");
     if !valid_id(id) {return Err("id Fabric non pris en charge".into());}
+    // Fail closed: a successfully opened JAR is not necessarily runnable.
+    // Mixins target Java Minecraft classes that do not exist in Horizon Rust;
+    // access wideners and nested libraries cannot be silently ignored either.
+    if meta["environment"].as_str()==Some("server") {
+        return Err("mod serveur uniquement: instance native cliente".into());
+    }
+    if meta["mixins"].as_array().is_some_and(|m|!m.is_empty())
+        || meta["mixins"].as_str().is_some() {
+        return Err("mixins Fabric declares: transformation Java/Minecraft NON prise en charge".into());
+    }
+    if meta["accessWidener"].as_str().is_some() {
+        return Err("accessWidener declare: non pris en charge".into());
+    }
+    if meta["jars"].as_array().is_some_and(|j|!j.is_empty()) {
+        return Err("JARs embarques declares: dependances non resolues".into());
+    }
+    if let Some(deps)=meta["depends"].as_object(){
+        for key in deps.keys(){
+            if !matches!(key.as_str(),"minecraft"|"fabricloader"|"java") {
+                return Err(format!("dependance non prise en charge: {key}"));
+            }
+        }
+    }
+    if meta["entrypoints"]["preLaunch"].as_array().is_some_and(|e|!e.is_empty()){
+        return Err("entrypoint preLaunch non pris en charge".into());
+    }
     let mut entries=Vec::new();
     for kind in ["main","client"] {
         if let Some(values)=meta["entrypoints"][kind].as_array(){
@@ -291,18 +316,35 @@ fn execute(jar:&Path,entries:&[(String,String)])->Result<(),String>{
     thread::spawn(move ||{
         // Java output is always untrusted. Read in bounded 2048-byte chunks.
         let mut reader=BufReader::new(stdout);
+        // Do not use read_until: a malicious JAR can print an unbounded line
+        // without a newline and exhaust Horizon's memory.
         let mut buffer=Vec::with_capacity(256);
         loop{
             buffer.clear();
-            match reader.read_until(b'\n',&mut buffer){
-                Ok(0)|Err(_)=>break,
-                Ok(_)=>{
-                    if buffer.len()>2048 {continue;}
-                    let Ok(line)=std::str::from_utf8(&buffer) else {continue;};
+            let mut too_long=false;
+            loop {
+                let Ok(chunk)=reader.fill_buf() else {return;};
+                if chunk.is_empty() {return;}
+                let newline=chunk.iter().position(|c|*c==b'\n');
+                let count=newline.map_or(chunk.len(),|i|i+1);
+                if !too_long {
+                    if count<=2048usize.saturating_sub(buffer.len()) {
+                        buffer.extend_from_slice(&chunk[..count]);
+                    } else {too_long=true;}
+                }
+                reader.consume(count);
+                if newline.is_some() {break;}
+            }
+            if !too_long {
+                if let Ok(line)=std::str::from_utf8(&buffer) {;
                     if let Some((name,reply))=parse_command(line.trim_end_matches(['\r','\n'])) {
                         if let Ok(mut s)=state().lock(){
                             if s.generation==generation && s.commands.len()<MAX_COMMANDS {
-                                s.commands.entry(name).or_insert(reply);
+                                // Do not allow a JAR to shadow Horizon's own commands
+                                // or the bridge control endpoint.
+                                if !matches!(name.as_str(),"fabricbridge"|"help"|"list"|"trust"){
+                                    s.commands.entry(name).or_insert(reply);
+                                }
                             }
                         }
                     }
