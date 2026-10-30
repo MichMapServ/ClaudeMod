@@ -117,3 +117,17 @@ la compatibilité universelle ne doit être publiée.
 Ne distribuer le bridge comme version vérifiée qu'après CI vert
 et confirmation Windows. Les branches sont en PR draft : audit basé
 sur #20, qui dépend de #19 et de #18. Aucun merge automatique.
+
+## Durcissement complémentaire (PR #22)
+
+- Contrôle strict des entrypoints Java (classe présente et déclarations valides).
+- Contrôle des tailles cumulées de décompression et du ratio ZIP.
+- Vidage continu et borné des sorties stdout/stderr de `javac` pour éviter le deadlock.
+- Cohérence renforcée du scanner : classes initialisatrices absentes et métadonnées ambiguës
+  classées comme bloquantes, contraintes de versions Java/Fabric/Minecraft signalées
+  comme **non vérifiées** (et non comme satisfaites).
+- Les modifications du scanner et de l'inspecteur de bytecode déclenchent les tests CI.
+
+Ces vérifications n'ajoutent ni Fabric Loader complet ni APIs Minecraft/Fabric manquantes.
+La validation ne pourra être déclarée acquise qu'après `cargo check`, tests Java/Rust
+et essais Windows réels.

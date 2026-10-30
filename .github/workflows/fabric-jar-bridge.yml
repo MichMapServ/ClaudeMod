@@ -6,6 +6,7 @@ on:
       - "scripts/build_fabric_jar_bridge.py"
       - "scripts/build_fabric_bridge_demo.py"
       - "scripts/audit_fabric_jars.py"
+      - "scripts/fabric_bytecode_inspector.py"
       - "scripts/tests/test_fabric_jar_audit.py"
       - "scripts/tests/test_fabric_jar_bridge.py"
       - ".github/workflows/fabric-jar-bridge.yml"
@@ -14,6 +15,10 @@ on:
     paths:
       - "native/FabricJarBridge/**"
       - "scripts/build_fabric_jar_bridge.py"
+      - "scripts/build_fabric_bridge_demo.py"
+      - "scripts/audit_fabric_jars.py"
+      - "scripts/fabric_bytecode_inspector.py"
+      - "scripts/tests/test_fabric_jar_audit.py"
       - "scripts/tests/test_fabric_jar_bridge.py"
       - ".github/workflows/fabric-jar-bridge.yml"
   workflow_dispatch:

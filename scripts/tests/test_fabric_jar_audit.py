@@ -90,6 +90,43 @@ class FabricJarAuditTests(unittest.TestCase):
             self.assertIn("unsafe_zip_path", codes)
             self.assertIn("duplicate_entries", codes)
 
+
+    def test_missing_entrypoint_and_malformed_metadata_block_execution(self):
+        cases = [
+            ("missing_class", {"id": "proof", "version": "1",
+                "entrypoints": {"main": ["missing.Main"]}}, "missing_entrypoint_class"),
+            ("invalid_entrypoint", {"id": "proof", "version": "1",
+                "entrypoints": {"main": [33]}}, "invalid_entrypoint"),
+            ("custom_entrypoint", {"id": "proof", "version": "1",
+                "entrypoints": {"custom": ["test.Main"]}}, "unsupported_entrypoint_kind"),
+            ("wrong_entrypoints", {"id": "proof", "version": "1",
+                "entrypoints": ["test.Main"]}, "invalid_entrypoints"),
+            ("wrong_depends", {"id": "proof", "version": "1",
+                "depends": ["fabric-api"]}, "invalid_dependencies"),
+            ("wrong_mixins", {"id": "proof", "version": "1",
+                "mixins": 18}, "invalid_mixins"),
+            ("wrong_jars", {"id": "proof", "version": "1",
+                "jars": {"file": "nested.jar"}}, "nested_jars"),
+            ("wrong_environment", {"id": "proof", "version": "1",
+                "environment": "both"}, "environment"),
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            for name, meta, expected in cases:
+                jar = Path(d) / (name + ".jar")
+                make_jar(jar, meta)
+                report = audit_mod.audit(jar)
+                self.assertEqual(report["execution"], "blocked", name)
+                self.assertIn(expected, [i["code"] for i in report["issues"]], name)
+
+    def test_dependency_versions_are_unverified_not_implicitly_compatible(self):
+        with tempfile.TemporaryDirectory() as d:
+            jar = Path(d) / "version.jar"
+            make_jar(jar, {"id": "proof", "version": "1",
+                           "depends": {"minecraft": "1.20.1", "java": ">=21"}})
+            report = audit_mod.audit(jar)
+            self.assertIn("unchecked_version_constraint",
+                          [i["code"] for i in report["issues"]])
+
     def test_non_fabric_and_unreadable(self):
         with tempfile.TemporaryDirectory() as d:
             plain = Path(d) / "plain.jar"
