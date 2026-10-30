@@ -40,6 +40,7 @@ jobs:
           python3 scripts/build_fabric_jar_bridge.py verify
           python3 scripts/build_fabric_bridge_demo.py
           unzip -l dist/FabricBridgeJavaProof.jar | grep proof/JavaProof.class
+          unzip -l dist/FabricBridgeJavaProof.jar | grep proof/ClientTickProof.class
           (cd dist && sha256sum -c FabricJarBridge.hnmod.sha256)
       - uses: actions/upload-artifact@v4
         with:
