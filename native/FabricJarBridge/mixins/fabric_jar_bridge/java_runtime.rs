@@ -1,6 +1,6 @@
-//! Experimental, opt-in Java sidecar: real Fabric onInitialize bytecode execution.
-//! Only net.fabricmc.api.* entrypoint interfaces and HorizonBridge.registerCommand
-//! are implemented. No Minecraft Java classes, Fabric API, or Mixin support.
+// Experimental, opt-in Java sidecar: real Fabric onInitialize bytecode execution.
+// Only net.fabricmc.api.* entrypoint interfaces and HorizonBridge.registerCommand
+// are implemented. No Minecraft Java classes, Fabric API, or Mixin support.
 use std::{
     collections::BTreeMap,
     fs::{self, File},
