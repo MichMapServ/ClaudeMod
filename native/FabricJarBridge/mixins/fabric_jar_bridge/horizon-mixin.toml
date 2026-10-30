@@ -13,7 +13,7 @@ name = "fabric_jar_bridge"
 source = "runtime.rs"
 
 [[module]]
-id = "java-sidecar"
+id = "java_sidecar"
 file = "crates/horizon-client/src/game.rs"
 name = "fabric_java_bridge"
 source = "java_runtime.rs"
