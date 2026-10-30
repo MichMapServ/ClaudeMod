@@ -5,6 +5,8 @@ on:
       - "native/FabricJarBridge/**"
       - "scripts/build_fabric_jar_bridge.py"
       - "scripts/build_fabric_bridge_demo.py"
+      - "scripts/audit_fabric_jars.py"
+      - "scripts/tests/test_fabric_jar_audit.py"
       - "scripts/tests/test_fabric_jar_bridge.py"
       - ".github/workflows/fabric-jar-bridge.yml"
   push:
@@ -36,11 +38,13 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest discover -s scripts/tests -p 'test_fabric_jar_bridge.py' -v
+          python3 -m unittest discover -s scripts/tests -p 'test_fabric_jar_audit.py' -v
           python3 scripts/build_fabric_jar_bridge.py pack
           python3 scripts/build_fabric_jar_bridge.py verify
           python3 scripts/build_fabric_bridge_demo.py
           unzip -l dist/FabricBridgeJavaProof.jar | grep proof/JavaProof.class
           unzip -l dist/FabricBridgeJavaProof.jar | grep proof/ClientTickProof.class
+          python3 scripts/audit_fabric_jars.py dist/FabricBridgeJavaProof.jar --json > dist/FabricBridgeJavaProof.audit.json
           (cd dist && sha256sum -c FabricJarBridge.hnmod.sha256)
       - uses: actions/upload-artifact@v4
         with:
@@ -49,6 +53,7 @@ jobs:
             dist/FabricJarBridge.hnmod
             dist/FabricJarBridge.hnmod.sha256
             dist/FabricBridgeJavaProof.jar
+            dist/FabricBridgeJavaProof.audit.json
           if-no-files-found: error
   native:
     runs-on: ubuntu-latest
