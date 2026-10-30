@@ -117,7 +117,7 @@ jobs:
         run: |
           cargo test --locked --no-default-features -p horizon-client --bin horizon-client fabric_jar_bridge::tests
           cargo test --locked --no-default-features -p horizon-client --bin horizon-client fabric_java_bridge::tests
-  windows-smoke:
+  windows_smoke:
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -146,11 +146,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   gate:
     if: always()
-    needs: [package, native, windows-smoke]
+    needs: [package, native, windows_smoke]
     runs-on: ubuntu-latest
     steps:
       - env:
           PACKAGE: ${{ needs.package.result }}
           NATIVE: ${{ needs.native.result }}
-          WINDOWS: ${{ needs.windows-smoke.result }}
+          WINDOWS: ${{ needs.windows_smoke.result }}
         run: test "$PACKAGE" = success && test "$NATIVE" = success && test "$WINDOWS" = success
