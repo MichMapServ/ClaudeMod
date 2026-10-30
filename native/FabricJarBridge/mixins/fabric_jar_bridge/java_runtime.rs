@@ -150,7 +150,7 @@ fn read_entrypoints(path:&Path)->Result<(String,Vec<(String,String)>),String>{
                 let class=match value {
                     serde_json::Value::String(class)=>class.as_str(),
                     serde_json::Value::Object(obj)=>{
-                        if obj.get("adapter").and_then(|v|v.as_str()).is_some_and(|a|a!="default") {
+                        if obj.get("adapter").is_some_and(|value|value.as_str()!=Some("default")) {
                             return Err(format!("entrypoint {kind}: adapter Java non pris en charge"));
                         }
                         obj.get("value").and_then(|v|v.as_str())
@@ -583,6 +583,7 @@ mod tests {
         let _=fs::create_dir_all(&root);
         for (name,manifest,expected) in [
             ("adapter",r#"{"id":"strict","entrypoints":{"main":[{"adapter":"kotlin","value":"x.Mod"}]}}"#,"adapter"),
+            ("adapter_type",r#"{"id":"strict","entrypoints":{"main":[{"adapter":42,"value":"x.Mod"}]}}"#,"adapter"),
             ("custom",r#"{"id":"strict","entrypoints":{"custom":["x.Mod"]}}"#,"non pris en charge"),
             ("malformed",r#"{"id":"strict","entrypoints":{"main":[42]}}"#,"format invalide"),
             ("absent",r#"{"id":"strict","entrypoints":{"main":["x.Mod"]}}"#,"classe absente"),
