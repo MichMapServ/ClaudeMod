@@ -28,7 +28,7 @@ fn publish(lines: Vec<String>) {
     if let Ok(mut out) = results().lock() { *out = lines; }
 }
 pub(super) fn status_lines() -> Vec<String> {
-    let mut out = vec!["Fabric Bridge: ressources locales uniquement; classes Java NON executees.".to_owned()];
+    let mut out = vec!["Fabric Bridge: ressources et Java experimental avec autorisation explicite par JAR.".to_owned()];
     if let Ok(lines) = results().lock() {
         if lines.is_empty() { out.push("Aucun fichier .jar detecte dans horizon-mods/.".into()); }
         else { out.extend(lines.iter().take(12).cloned()); }
@@ -184,8 +184,10 @@ pub(super) fn content_root(root: &Path, enabled: &BTreeSet<String>, dev: &[PathB
         jars.truncate(MAX_JARS);
     }
     let cache=here.join(".horizon-cache/fabric-jar-bridge");
+    crate::game::fabric_java_bridge::reset();
     for jar in jars {
         let name=jar.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let java_report=crate::game::fabric_java_bridge::inspect_and_run(&jar);
         match convert_jar(&jar,&cache) {
             Ok(Some((carried,summary)))=>{
                 let parsed=Package::read(&carried).and_then(|p|{
@@ -202,13 +204,14 @@ pub(super) fn content_root(root: &Path, enabled: &BTreeSet<String>, dev: &[PathB
                 }
             }
             Ok(None)=>{
-                lines.push(format!("{name}: aucun contenu portable; code Java NON execute."));
+                lines.push(format!("{name}: aucun contenu portable (voir statut Java)."));
             }
             Err(e)=>{
                 log::warn!("Fabric Bridge: {name}: {e}");
                 lines.push(format!("{name}: refuse - {e}"));
             }
         }
+        lines.push(format!("{name}: {java_report}"));
     }
     match mod_content::resource_root(root,&mods,&here.join(".horizon-cache")){
         Ok(out)=>{publish(lines);out},
