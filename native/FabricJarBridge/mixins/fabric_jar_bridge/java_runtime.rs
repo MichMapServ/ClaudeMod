@@ -1,13 +1,13 @@
 // Experimental, opt-in Java sidecar: real Fabric onInitialize bytecode execution.
-// Only net.fabricmc.api.* entrypoint interfaces and HorizonBridge.registerCommand
-// are implemented. No Minecraft Java classes, Fabric API, or Mixin support.
+// A limited MinecraftClient/player position facade and END_CLIENT_TICK event
+// are backed by real Horizon native tick hooks. No general Fabric/Minecraft/Mixin support.
 use std::{
     collections::BTreeMap,
     fs::{self, File},
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
-    sync::{Mutex, OnceLock},
+    process::{Child, Command, Output, Stdio},
+    sync::{mpsc::{sync_channel, SyncSender, TrySendError}, Mutex, OnceLock},
     thread,
     time::{Duration, Instant},
 };
@@ -19,10 +19,24 @@ const MAX_COMMANDS: usize = 32;
 #[derive(Clone)]
 struct Found { id: String, sha: String }
 #[derive(Default)]
-struct State { found: Vec<Found>, commands: BTreeMap<String,String> }
+struct JavaProcess { child: Child, send: SyncSender<String> }
+#[derive(Default)]
+struct State {
+    found: Vec<Found>,
+    commands: BTreeMap<String,String>,
+    processes: Vec<JavaProcess>,
+    generation: u64,
+}
 static STATE: OnceLock<Mutex<State>> = OnceLock::new();
 fn state() -> &'static Mutex<State> { STATE.get_or_init(||Mutex::new(State::default())) }
-pub fn reset() { if let Ok(mut s)=state().lock() {*s=State::default();} }
+pub fn reset() {
+    if let Ok(mut s)=state().lock() {
+        for process in &mut s.processes {let _=process.child.kill();let _=process.child.wait();}
+        let next=s.generation.wrapping_add(1);
+        *s=State::default();
+        s.generation=next;
+    }
+}
 pub fn command(name: &str) -> Option<String> {state().lock().ok()?.commands.get(name).cloned()}
 fn trust_path() -> PathBuf {
     std::env::current_dir().unwrap_or_default().join("horizon-mods/fabricbridge-trusted.txt")
@@ -130,31 +144,102 @@ public final class HorizonBridge {
     }
 }
 "#;
+const BLOCK_POS:&str=r#"package net.minecraft.util.math;
+public final class BlockPos {
+    private final int x,y,z;
+    public BlockPos(int x,int y,int z){this.x=x;this.y=y;this.z=z;}
+    public int getX(){return x;}
+    public int getY(){return y;}
+    public int getZ(){return z;}
+}
+"#;
+const PLAYER:&str=r#"package net.minecraft.client.network;
+import net.minecraft.util.math.BlockPos;
+public class ClientPlayerEntity {
+    private final double x,y,z;
+    public ClientPlayerEntity(double x,double y,double z){this.x=x;this.y=y;this.z=z;}
+    public double getX(){return x;}
+    public double getY(){return y;}
+    public double getZ(){return z;}
+    public int getBlockX(){return (int)Math.floor(x);}
+    public int getBlockY(){return (int)Math.floor(y);}
+    public int getBlockZ(){return (int)Math.floor(z);}
+    public BlockPos getBlockPos(){return new BlockPos(getBlockX(),getBlockY(),getBlockZ());}
+}
+"#;
+const MINECRAFT:&str=r#"package net.minecraft.client;
+import net.minecraft.client.network.ClientPlayerEntity;
+public final class MinecraftClient {
+    private static final MinecraftClient INSTANCE=new MinecraftClient();
+    public volatile ClientPlayerEntity player;
+    private MinecraftClient(){}
+    public static MinecraftClient getInstance(){return INSTANCE;}
+    public static void __horizonUpdate(double x,double y,double z,boolean present){
+        INSTANCE.player=present?new ClientPlayerEntity(x,y,z):null;
+    }
+}
+"#;
+const CLIENT_TICK:&str=r#"package net.fabricmc.fabric.api.client.event.lifecycle.v1;
+import java.util.concurrent.CopyOnWriteArrayList;
+import net.minecraft.client.MinecraftClient;
+public final class ClientTickEvents {
+    private ClientTickEvents(){}
+    @FunctionalInterface public interface EndTick {void onEndTick(MinecraftClient client);}
+    public interface EndTickEvent {void register(EndTick callback);}
+    private static final CopyOnWriteArrayList<EndTick> END=new CopyOnWriteArrayList<>();
+    public static final EndTickEvent END_CLIENT_TICK=callback->END.add(callback);
+    public static void __horizonTick(){
+        MinecraftClient client=MinecraftClient.getInstance();
+        for(EndTick callback:END) callback.onEndTick(client);
+    }
+}
+"#;
 const RUNNER: &str=r#"package dev.horizon.fabricbridge;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.api.ClientModInitializer;
 public final class Runner {
     public static void main(String[] args) throws Exception {
-        if(args.length!=2) throw new IllegalArgumentException("mode and class required");
-        Class<?> type=Class.forName(args[1]);
-        Object mod=type.getDeclaredConstructor().newInstance();
-        if("main".equals(args[0])) ((ModInitializer)mod).onInitialize();
-        else if("client".equals(args[0])) ((ClientModInitializer)mod).onInitializeClient();
-        else throw new IllegalArgumentException("Unsupported Fabric entrypoint");
+        if(args.length==0 || args.length%2!=0) throw new IllegalArgumentException("mode/class pairs required");
+        for(int i=0;i<args.length;i+=2) {
+            Class<?> type=Class.forName(args[i+1]);
+            Object mod=type.getDeclaredConstructor().newInstance();
+            if("main".equals(args[i])) ((ModInitializer)mod).onInitialize();
+            else if("client".equals(args[i])) ((ClientModInitializer)mod).onInitializeClient();
+            else throw new IllegalArgumentException("Unsupported Fabric entrypoint");
+        }
+        java.io.BufferedReader input=new java.io.BufferedReader(
+            new java.io.InputStreamReader(System.in,java.nio.charset.StandardCharsets.UTF_8));
+        for(String line;(line=input.readLine())!=null;) {
+            if("NONE".equals(line)) {
+                net.minecraft.client.MinecraftClient.__horizonUpdate(0,0,0,false);
+            } else if(line.startsWith("TICK\t")) {
+                String[] values=line.split("\t");
+                if(values.length!=4) continue;
+                double x=Double.parseDouble(values[1]);
+                double y=Double.parseDouble(values[2]);
+                double z=Double.parseDouble(values[3]);
+                net.minecraft.client.MinecraftClient.__horizonUpdate(x,y,z,true);
+            } else continue;
+            net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents.__horizonTick();
+        }
     }
 }
 "#;
-fn shim_files()->[(&'static str,&'static str);4]{
+fn shim_files()->[(&'static str,&'static str);8]{
     [
         ("net/fabricmc/api/ModInitializer.java",MOD),
         ("net/fabricmc/api/ClientModInitializer.java",CLIENT),
         ("dev/horizon/fabricbridge/HorizonBridge.java",API),
         ("dev/horizon/fabricbridge/Runner.java",RUNNER),
+        ("net/minecraft/util/math/BlockPos.java",BLOCK_POS),
+        ("net/minecraft/client/network/ClientPlayerEntity.java",PLAYER),
+        ("net/minecraft/client/MinecraftClient.java",MINECRAFT),
+        ("net/fabricmc/fabric/api/client/event/lifecycle/v1/ClientTickEvents.java",CLIENT_TICK),
     ]
 }
 fn shim()->Result<PathBuf,String>{
     let dir=std::env::current_dir().unwrap_or_default()
-        .join(".horizon-cache/fabric-jar-bridge/java-shim");
+        .join(".horizon-cache/fabric-jar-bridge/java-shim-v03");
     let classes=dir.join("classes");
     if classes.join("dev/horizon/fabricbridge/Runner.class").is_file() {return Ok(classes);}
     let mut files=Vec::new();
@@ -175,30 +260,75 @@ fn shim()->Result<PathBuf,String>{
     }
     Ok(classes)
 }
-fn execute(jar:&Path,entries:&[(String,String)])->Result<Vec<(String,String)>,String>{
+fn parse_command(line:&str)->Option<(String,String)>{
+    let payload=line.strip_prefix("HBR1\t")?;
+    let (name,reply)=payload.split_once('\t')?;
+    if name.is_empty() || name.len()>32
+        || !name.bytes().all(|b|b.is_ascii_lowercase()||b.is_ascii_digit()||b==b'_')
+        || reply.len()>720 {return None;}
+    Some((name.to_owned(),reply.to_owned()))
+}
+fn execute(jar:&Path,entries:&[(String,String)])->Result<(),String>{
     let classes=shim()?;
     let separator=if cfg!(windows){';'}else{':'};
     let classpath=format!("{}{}{}",classes.display(),separator,jar.display());
-    let mut commands=Vec::new();
-    for (kind,class) in entries {
-        let mut cmd=Command::new("java");
-        cmd.arg("-cp").arg(&classpath).arg("dev.horizon.fabricbridge.Runner")
-            .arg(kind).arg(class);
-        let output=timed(cmd,Duration::from_secs(6))?;
-        if !output.status.success(){
-            return Err(format!("{kind} {class}: {}",String::from_utf8_lossy(&output.stderr)
-                .lines().next().unwrap_or("initialisation echouee")));
+    let mut cmd=Command::new("java");
+    cmd.arg("-cp").arg(&classpath).arg("dev.horizon.fabricbridge.Runner");
+    for (kind,class) in entries {cmd.arg(kind).arg(class);}
+    let mut child=cmd.stdin(Stdio::piped()).stdout(Stdio::piped())
+        .stderr(Stdio::inherit()).spawn().map_err(|e|format!("Java non disponible: {e}"))?;
+    let stdin=child.stdin.take().ok_or("stdin JVM indisponible")?;
+    let stdout=child.stdout.take().ok_or("stdout JVM indisponible")?;
+    let (send,receive)=sync_channel::<String>(4);
+    let generation=state().lock().map_err(|e|e.to_string())?.generation;
+    thread::spawn(move ||{
+        // Dedicated writer prevents slow Java mods from blocking the game tick.
+        let mut out=stdin;
+        for event in receive {
+            if writeln!(out,"{event}").is_err() || out.flush().is_err(){break;}
         }
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
-            let Some(body)=line.strip_prefix("HBR1\t") else {continue;};
-            let Some((name,reply))=body.split_once('\t') else {continue;};
-            if name.is_empty() || name.len()>32
-                || !name.bytes().all(|b|b.is_ascii_lowercase()||b.is_ascii_digit()||b==b'_')
-                || reply.len()>720 || commands.len()>=MAX_COMMANDS {continue;}
-            commands.push((name.to_string(),reply.to_string()));
+    });
+    thread::spawn(move ||{
+        // Java output is always untrusted. Read in bounded 2048-byte chunks.
+        let mut reader=BufReader::new(stdout);
+        let mut buffer=Vec::with_capacity(256);
+        loop{
+            buffer.clear();
+            match reader.read_until(b'\n',&mut buffer){
+                Ok(0)|Err(_)=>break,
+                Ok(_)=>{
+                    if buffer.len()>2048 {continue;}
+                    let Ok(line)=std::str::from_utf8(&buffer) else {continue;};
+                    if let Some((name,reply))=parse_command(line.trim_end_matches(['\r','\n'])) {
+                        if let Ok(mut s)=state().lock(){
+                            if s.generation==generation && s.commands.len()<MAX_COMMANDS {
+                                s.commands.entry(name).or_insert(reply);
+                            }
+                        }
+                    }
+                }
+            }
         }
+    });
+    state().lock().map_err(|e|e.to_string())?.processes.push(JavaProcess{child,send});
+    Ok(())
+}
+/// Queue a client tick and actual player position for each running JVM.
+/// Bounded channels avoid blocking Horizon when Java stalls.
+pub fn tick(position:Option<[f64;3]>) {
+    let line=match position {
+        Some([x,y,z]) if x.is_finite() && y.is_finite() && z.is_finite()=>format!("TICK\t{x}\t{y}\t{z}"),
+        _=>"NONE".to_owned(),
+    };
+    if let Ok(mut s)=state().lock(){
+        s.processes.retain_mut(|p|{
+            if !matches!(p.child.try_wait(),Ok(None)){return false;}
+            match p.send.try_send(line.clone()){
+                Ok(())|Err(TrySendError::Full(_))=>true,
+                Err(TrySendError::Disconnected(_))=>false,
+            }
+        });
     }
-    Ok(commands)
 }
 pub fn inspect_and_run(jar:&Path)->String{
     let (id,entries)=match read_entrypoints(jar){
@@ -211,15 +341,7 @@ pub fn inspect_and_run(jar:&Path)->String{
         return format!("Java NON execute (securite). /fabricbridge trust {id}, puis redemarrage");
     }
     match execute(jar,&entries){
-        Ok(commands)=>{
-            let count=commands.len();
-            if let Ok(mut s)=state().lock(){
-                for (name,reply) in commands {
-                    if s.commands.len()<MAX_COMMANDS {s.commands.entry(name).or_insert(reply);}
-                }
-            }
-            format!("Java reel execute: {} entrypoints, {count} commandes Horizon",entries.len())
-        }
+        Ok(())=>format!("JVM lancee: {} entrypoint(s), ClientTickEvents.END_CLIENT_TICK actif (si enregistre)",entries.len()),
         Err(e)=>format!("Java echec/incompatibilite: {e}"),
     }
 }
