@@ -33,7 +33,7 @@ def issue(issues: list[dict], severity: str, code: str, message: str) -> None:
 
 
 def path_safe(name: str) -> bool:
-    if not name or len(name) > 512 or "\\" in name or name.startswith("/") or "\x00" in name:
+    if not name or len(name) > 512 or "\\" in name or name.startswith("/") or ":" in name or "\x00" in name:
         return False
     path = PurePosixPath(name)
     return all(part not in ("", ".", "..") for part in name.rstrip("/").split("/")) and ".." not in path.parts
