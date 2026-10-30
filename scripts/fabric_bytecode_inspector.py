@@ -17,6 +17,8 @@ class BadClassfile(ValueError):
 SUPPORTED = frozenset({
     "net/fabricmc/api/ModInitializer",
     "net/fabricmc/api/ClientModInitializer",
+    "net/fabricmc/api/EnvType",
+    "net/fabricmc/loader/api/FabricLoader",
     "net/minecraft/client/MinecraftClient",
     "net/minecraft/client/network/ClientPlayerEntity",
     "net/minecraft/util/math/BlockPos",

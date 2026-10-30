@@ -32,7 +32,7 @@ class FabricJarBridgePackageTests(unittest.TestCase):
 
     def test_opt_in_jvm_sidecar_is_auditable_and_packaged(self):
         manifest, files = pkg.entries()
-        self.assertEqual(manifest["version"], "0.3.0")
+        self.assertEqual(manifest["version"], "0.4.0")
         java = files["mixins/fabric_jar_bridge/java_runtime.rs"].decode()
         self.assertIn('Command::new("java")', java)
         self.assertIn('Command::new("javac")', java)
@@ -45,6 +45,11 @@ class FabricJarBridgePackageTests(unittest.TestCase):
         self.assertIn('target = "horizon_client::game::native_hooks::Game<\'_>::native_tick"', toml)
         self.assertIn("ClientTickEvents.END_CLIENT_TICK", java)
         self.assertIn("fn execute(jar:", java)
+        self.assertIn("fn execute_group(", java)
+        self.assertIn("fn plan_mods(", java)
+        self.assertIn("net/fabricmc/loader/api/FabricLoader.java", java)
+        self.assertIn("fabricbridge.mods=", java)
+        self.assertIn("inspect_and_run_all", files["mixins/fabric_jar_bridge/runtime.rs"].decode())
         self.assertIn("fn actual_client_tick_event_uses_live_horizon_position()", java)
         self.assertIn("native_player()", files["mixins/fabric_jar_bridge/tick.rs"].decode())
 

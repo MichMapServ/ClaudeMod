@@ -185,9 +185,11 @@ pub(super) fn content_root(root: &Path, enabled: &BTreeSet<String>, dev: &[PathB
     }
     let cache=here.join(".horizon-cache/fabric-jar-bridge");
     crate::game::fabric_java_bridge::reset();
-    for jar in jars {
+    // Resolve the full local Fabric mod set before starting Java, so
+    // dependency classes share a single JVM and initialize in graph order.
+    let java_reports=crate::game::fabric_java_bridge::inspect_and_run_all(&jars);
+    for (jar,java_report) in jars.into_iter().zip(java_reports) {
         let name=jar.file_name().unwrap_or_default().to_string_lossy().to_string();
-        let java_report=crate::game::fabric_java_bridge::inspect_and_run(&jar);
         match convert_jar(&jar,&cache) {
             Ok(Some((carried,summary)))=>{
                 let parsed=Package::read(&carried).and_then(|p|{
