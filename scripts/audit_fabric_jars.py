@@ -173,7 +173,7 @@ def audit(path: Path) -> dict:
                 issue(issues, "blocker", "nested_jars", "JARs embarques non resolus")
             dependencies = meta.get("depends", {})
             if isinstance(dependencies, dict):
-                result["dependencies"] = {str(k)[:64]: str(v)[:140] for k, v in list(dependencies.items())[:100]}
+                result["dependencies"] = {str(k)[:64]: v for k, v in list(dependencies.items())[:100]}
                 for dep, constraint in dependencies.items():
                     if dep not in BASE_DEPENDENCIES:
                         issue(issues, "blocker", "external_dependency", f"Dependance manquante/non resolue: {dep}")
@@ -253,12 +253,161 @@ def audit(path: Path) -> dict:
     return result
 
 
+def _numeric_version(value: str) -> tuple[int, int, int]:
+    """Common numeric Fabric version subset; non-numeric versions are unknown."""
+    if not isinstance(value, str) or "-" in value:
+        raise ValueError("prerelease/non-numeric version")
+    parts = value.split("+", 1)[0].split(".")
+    if not 1 <= len(parts) <= 3 or any(not x.isdigit() for x in parts):
+        raise ValueError("unsupported version syntax")
+    return tuple(map(int, parts + ["0"] * (3 - len(parts))))
+
+
+def _predicate(actual: str, required: str) -> bool:
+    if required == "*":
+        return True
+    if not isinstance(required, str) or len(required) > 160:
+        raise ValueError("invalid dependency predicate")
+    clauses = required.split()
+    if len(clauses) > 1:
+        return all(_predicate(actual, clause) for clause in clauses)
+    if "||" in required or "*" in required:
+        raise ValueError("unsupported wildcard/alternative syntax")
+    op = next((candidate for candidate in ("<=", ">=", "==", "=", "<", ">", "^", "~")
+               if required.startswith(candidate)), "=")
+    expression = required[len(op):] if required.startswith(op) else required
+    current, requested = _numeric_version(actual), _numeric_version(expression)
+    if op in ("=", "=="):
+        return current == requested
+    if op == "<":
+        return current < requested
+    if op == ">":
+        return current > requested
+    if op == "<=":
+        return current <= requested
+    if op == ">=":
+        return current >= requested
+    if op in ("^", "~"):
+        upper = list(requested)
+        idx = (0 if requested[0] else 1 if requested[1] else 2) if op == "^" else (
+            1 if "." in expression else 0)
+        upper[idx] += 1
+        for j in range(idx + 1, 3):
+            upper[j] = 0
+        return requested <= current < tuple(upper)
+    raise ValueError("unsupported version operator")
+
+
+def audit_set(paths: list[Path]) -> list[dict]:
+    """Offline batch report with locally available dependency diagnostics.
+
+    This does not execute mods or prove that the Horizon JVM can initialize them.
+    """
+    reports = [audit(path) for path in paths]
+    available: dict[str, dict] = {}
+    for report in reports:
+        mod_id = report["id"]
+        if report["format"] != "fabric" or not isinstance(mod_id, str):
+            continue
+        if mod_id in available:
+            for item in (available[mod_id], report):
+                issue(item["issues"], "blocker", "duplicate_mod_id",
+                      f"Identifiant Fabric duplique dans le lot: {mod_id}")
+        else:
+            available[mod_id] = report
+
+    for report in reports:
+        if report["format"] != "fabric":
+            continue
+        dependencies = report["dependencies"]
+        kept = []
+        for entry in report["issues"]:
+            if entry["code"] != "external_dependency":
+                kept.append(entry)
+                continue
+            name = entry["message"].rsplit(": ", 1)[-1]
+            dep = available.get(name)
+            if dep is None:
+                kept.append(entry)
+                continue
+            predicate = dependencies.get(name, "*")
+            if isinstance(predicate, str):
+                predicates = [predicate]
+            elif isinstance(predicate, list) and predicate and all(isinstance(x, str) for x in predicate):
+                predicates = predicate
+            else:
+                kept.append(entry)
+                continue
+            try:
+                compatible = any(_predicate(dep["version"], p) for p in predicates)
+            except (ValueError, TypeError):
+                kept.append(entry)
+                issue(kept, "blocker", "unsupported_dependency_version",
+                      f"Contrainte de version non prise en charge: {name}")
+                continue
+            if compatible:
+                issue(kept, "info", "local_dependency_found",
+                      f"Archive locale trouvee pour {name} (autorisation et API JVM non verifiees)")
+            else:
+                kept.append(entry)
+                issue(kept, "blocker", "dependency_version_mismatch",
+                      f"Version incompatible pour {name}: {dep['version']}")
+        report["issues"] = kept
+
+    # A local dependency is only a candidate if all its prerequisites are
+    # candidates. Bound the fixed point to the supplied file count.
+    for _ in reports:
+        changed = False
+        for report in reports:
+            if report["format"] != "fabric":
+                continue
+            if any(i["code"] == "blocked_dependency" for i in report["issues"]):
+                continue
+            for name in report["dependencies"]:
+                if name in BASE_DEPENDENCIES:
+                    continue
+                dep = available.get(name)
+                if dep and any(i["severity"] == "blocker" for i in dep["issues"]):
+                    issue(report["issues"], "blocker", "blocked_dependency",
+                          f"Dependance locale elle-meme bloquee: {name}")
+                    changed = True
+                    break
+        if not changed:
+            break
+
+    # Eliminate nodes in topological order. Remaining candidates form
+    # dependency cycles (or chains depending on those cycles).
+    pending = {
+        mod_id for mod_id, report in available.items()
+        if not any(i["severity"] == "blocker" for i in report["issues"])
+    }
+    for _ in range(len(pending)):
+        ready = {
+            mod_id for mod_id in pending
+            if not any(dep in pending for dep in available[mod_id]["dependencies"]
+                       if dep not in BASE_DEPENDENCIES)
+        }
+        if not ready:
+            break
+        pending -= ready
+    for mod_id in pending:
+        issue(available[mod_id]["issues"], "blocker", "dependency_cycle",
+              f"Cycle ou chaine de dependances cyclique: {mod_id}")
+
+    for report in reports:
+        if report["format"] == "fabric":
+            blocked = any(i["severity"] == "blocker" for i in report["issues"])
+            report["execution"] = ("blocked" if blocked else
+                                   "candidate_only" if report["entrypoints"] else "no_entrypoint")
+    return reports
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("jars", type=Path, nargs="+")
     parser.add_argument("--json", action="store_true", help="JSON machine-readable report")
     args = parser.parse_args()
-    reports = [audit(path) for path in args.jars]
+    reports = audit_set(args.jars)
     if args.json:
         print(json.dumps(reports, ensure_ascii=False, indent=2))
     else:

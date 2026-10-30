@@ -96,3 +96,7 @@ La JVM groupée expose maintenant quelques méthodes de `net.fabricmc.loader.api
 ### Confirmation d'initialisation Java (0.4.0)
 
 Le bridge attend maintenant, pendant au plus 10 secondes, le signal de fin de la séquence d'initialisation émis par le `Runner` après l'appel de tous les entrypoints Java. En absence de confirmation (exception ou blocage), il ferme la JVM et refuse le groupe. Les réponses des commandes provisoires sont supprimées si l'initialisation échoue. Le signal prouve le retour des entrypoints, **pas la conformité du mod ni la disponibilité de toutes les fonctions Fabric/Minecraft**.
+
+### Auditer plusieurs archives ensemble
+
+`python scripts/audit_fabric_jars.py mods/library.jar mods/consumer.jar --json` résout maintenant les dépendances **locales** de l'ensemble examiné : le scanner compare les versions prises en charge, signale les cycles, les ID dupliqués et les dépendances toujours absentes. L'audit isolé d'un seul JAR continue de signaler ses dépendances externes. Ce rapport hors ligne n'exécute aucun code Java et ne vaut pas autorisation ni test fonctionnel Horizon.

@@ -127,6 +127,42 @@ class FabricJarAuditTests(unittest.TestCase):
             self.assertIn("unchecked_version_constraint",
                           [i["code"] for i in report["issues"]])
 
+    def test_audit_set_finds_local_approved_candidate_without_executing(self):
+        with tempfile.TemporaryDirectory() as d:
+            lib = Path(d) / "library.jar"
+            consumer = Path(d) / "consumer.jar"
+            make_jar(lib, {"id": "library", "version": "1.2.0"})
+            make_jar(consumer, {"id": "consumer", "version": "1.0.0",
+                                "depends": {"library": ">=1.0 <2"},
+                                "entrypoints": {"main": ["consumer.Main"]}},
+                     {"consumer/Main.class": b"\xca\xfe\xba\xbe\x00\x00\x00\x41"})
+            result = audit_mod.audit_set([consumer, lib])
+            self.assertEqual(result[0]["execution"], "candidate_only")
+            self.assertIn("local_dependency_found",
+                          [x["code"] for x in result[0]["issues"]])
+            self.assertEqual(audit_mod.audit(consumer)["execution"], "blocked")
+            self.assertEqual(result[1]["execution"], "no_entrypoint")
+            self.assertEqual(audit_mod._predicate("1.5.0", "^1.2.3"), True)
+            self.assertEqual(audit_mod._predicate("2.0", "^1.2.3"), False)
+
+    def test_audit_set_rejects_cycles_and_wrong_versions(self):
+        with tempfile.TemporaryDirectory() as d:
+            a, b = Path(d) / "alpha.jar", Path(d) / "beta.jar"
+            make_jar(a, {"id": "alpha", "version": "1.0",
+                         "depends": {"beta": "*"}})
+            make_jar(b, {"id": "beta", "version": "1.0",
+                         "depends": {"alpha": "*"}})
+            result = audit_mod.audit_set([a, b])
+            self.assertEqual([x["execution"] for x in result], ["blocked", "blocked"])
+            for report in result:
+                self.assertIn("dependency_cycle", [x["code"] for x in report["issues"]])
+            make_jar(b, {"id": "beta", "version": "2.0.0"})
+            make_jar(a, {"id": "alpha", "version": "1.0",
+                         "depends": {"beta": "<2"}})
+            result = audit_mod.audit_set([a, b])
+            self.assertIn("dependency_version_mismatch",
+                          [x["code"] for x in result[0]["issues"]])
+
     def test_non_fabric_and_unreadable(self):
         with tempfile.TemporaryDirectory() as d:
             plain = Path(d) / "plain.jar"
