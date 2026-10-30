@@ -420,6 +420,41 @@ mod tests {
         assert!(!valid_class("../evil"));
     }
     #[test]
+    fn rejects_unsupported_loader_features_and_unsafe_zip_before_java(){
+        let root=std::env::temp_dir().join(format!("fabricbridge-metadata-test-{}",std::process::id()));
+        let _=fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        for (name,manifest,extra,expected) in [
+            ("mixin",r#"{"id":"mixin","entrypoints":{"main":["x.Mod"]},"mixins":["x.mixins.json"]}"#,None,"mixins Fabric"),
+            ("depends",r#"{"id":"depends","entrypoints":{"main":["x.Mod"]},"depends":{"fabric-api":"*"}}"#,None,"dependance non prise"),
+            ("widener",r#"{"id":"widener","entrypoints":{"main":["x.Mod"]},"accessWidener":"some.accesswidener"}"#,None,"accessWidener"),
+            ("nested",r#"{"id":"nested","entrypoints":{"main":["x.Mod"]},"jars":[{"file":"META-INF/jarjar/embedded.jar"}]}"#,None,"embarques"),
+            ("traversal",r#"{"id":"traversal","entrypoints":{"main":["x.Mod"]}}"#,Some("../evil.class"),"nom de fichier JAR"),
+        ] {
+            let jar=root.join(format!("{name}.jar"));
+            let mut zip=ZipWriter::new(File::create(&jar).unwrap());
+            zip.start_file("fabric.mod.json",SimpleFileOptions::default()).unwrap();
+            zip.write_all(manifest.as_bytes()).unwrap();
+            if let Some(path)=extra {
+                zip.start_file(path,SimpleFileOptions::default()).unwrap();
+                zip.write_all(b"test").unwrap();
+            }
+            zip.finish().unwrap();
+            let error=read_entrypoints(&jar).unwrap_err();
+            assert!(error.contains(expected),"{name}: {error}");
+        }
+        let _=fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn java_output_protocol_refuses_malformed_records(){
+        assert_eq!(parse_command("HBR1\tfoo\tbar"),Some(("foo".into(),"bar".into())));
+        assert!(parse_command("HBR1\tbad-name\tno").is_none());
+        assert!(parse_command("HBR1\tfoo").is_none());
+        assert!(parse_command("ordinary stdout line").is_none());
+        assert!(parse_command(&format!("HBR1\tfoo\t{}", "x".repeat(721))).is_none());
+    }
+    #[test]
     fn runs_actual_fabric_initializer_and_exposes_command(){
         if Command::new("javac").arg("-version").output().is_err(){return;}
         let root=std::env::temp_dir().join(format!("fabricbridge-java-test-{}",std::process::id()));
