@@ -1,6 +1,6 @@
 [mod]
 id = "fabric_jar_bridge"
-version = "0.1.0"
+version = "0.2.0"
 priority = 120
 
 [compatibility]
@@ -11,6 +11,12 @@ id = "runtime"
 file = "crates/horizon-client/src/game.rs"
 name = "fabric_jar_bridge"
 source = "runtime.rs"
+
+[[module]]
+id = "java-sidecar"
+file = "crates/horizon-client/src/game.rs"
+name = "fabric_java_bridge"
+source = "java_runtime.rs"
 
 # One exact-revision startup injection, before Horizon prepares resources.
 # We must include ordinary Horizon content mods in the combined overlay.
