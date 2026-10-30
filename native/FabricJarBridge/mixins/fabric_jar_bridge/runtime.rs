@@ -41,6 +41,10 @@ fn valid_id(id: &str) -> bool {
     id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 fn carry_path(name: &str, id: &str) -> bool {
+    // Asset-only import: do not move embedded executables, Java classes or
+    // nested archives even if a malicious jar disguises them as resources.
+    if [".class",".jar",".dll",".exe",".so",".dylib",".ps1",".bat",".sh",".wasm"].iter()
+        .any(|ext|name.ends_with(ext)) {return false;}
     if horizon_mods::content::check_path(name).is_err() { return false; }
     let Some((top, ns, rest)) = ({
         let mut p = name.splitn(3, '/');
@@ -168,6 +172,7 @@ pub(super) fn content_root(root: &Path, enabled: &BTreeSet<String>, dev: &[PathB
             Err(e)=>log::warn!("Fabric Bridge: standard mod {} refused: {e}",m.id),
         }
     }
+    let original_mods=mods.len();
     let mut lines=Vec::new();
     let mut jars=fs::read_dir(&dir).ok().into_iter().flatten().flatten()
         .map(|e|e.path())
@@ -205,12 +210,18 @@ pub(super) fn content_root(root: &Path, enabled: &BTreeSet<String>, dev: &[PathB
             }
         }
     }
-    publish(lines);
     match mod_content::resource_root(root,&mods,&here.join(".horizon-cache")){
-        Ok(out)=>out,
+        Ok(out)=>{publish(lines);out},
         Err(e)=>{
-            log::warn!("Fabric Bridge: overlay content failed: {e}");
-            root.to_owned()
+            log::warn!("Fabric Bridge: combined overlay failed: {e}; retrying original Horizon mods only");
+            // A bad Fabric resource must never take down already installed .hmod content.
+            mods.truncate(original_mods);
+            lines.push("Import annule: une ressource incompatible a ete refusee (voir logs).".into());
+            publish(lines);
+            match mod_content::resource_root(root,&mods,&here.join(".horizon-cache")){
+                Ok(out)=>out,
+                Err(e)=>{log::warn!("Fabric Bridge: base content also failed: {e}");root.to_owned()}
+            }
         }
     }
 }
@@ -225,6 +236,8 @@ mod tests {
         assert!(!carry_path("assets/other/textures/a.png","ruby"));
         assert!(!carry_path("assets/ruby/../../evil.txt","ruby"));
         assert!(!carry_path("data/ruby/Bad.txt","ruby"));
+        assert!(!carry_path("assets/ruby/lib/Hidden.class","ruby"));
+        assert!(!carry_path("assets/ruby/native/code.dll","ruby"));
     }
     #[test] fn ids_are_checked(){
         assert!(valid_id("ruby_items"));
