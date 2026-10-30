@@ -2,7 +2,7 @@
 // A limited MinecraftClient/player position facade and END_CLIENT_TICK event
 // are backed by real Horizon native tick hooks. No general Fabric/Minecraft/Mixin support.
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     fs::{self, File},
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
@@ -18,7 +18,6 @@ const MAX_ENTRYPOINTS: usize = 8;
 const MAX_COMMANDS: usize = 32;
 #[derive(Clone)]
 struct Found { id: String, sha: String }
-#[derive(Default)]
 struct JavaProcess { child: Child, send: SyncSender<String> }
 #[derive(Default)]
 struct State {
@@ -63,7 +62,8 @@ pub fn trust(id:&str)->String {
 }
 fn valid_id(s:&str)->bool {
     !s.is_empty() && s.len()<=64
-        && s.bytes().all(|b|b.is_ascii_lowercase()||b.is_ascii_digit()||b==b'_')
+        && s.bytes().next().is_some_and(|c|c.is_ascii_lowercase())
+        && s.bytes().all(|b|b.is_ascii_lowercase()||b.is_ascii_digit()||b==b'_'||b==b'-')
 }
 fn valid_class(s:&str)->bool {
     !s.is_empty() && s.len()<=180 && !s.starts_with('.') && !s.ends_with('.')
@@ -71,8 +71,28 @@ fn valid_class(s:&str)->bool {
         && s.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'.'||b==b'_'||b==b'$')
 }
 fn read_entrypoints(path:&Path)->Result<(String,Vec<(String,String)>),String>{
+    if fs::metadata(path).map_err(|e|e.to_string())?.len()>128*1024*1024{
+        return Err("JAR depasse 128 MiB".into());
+    }
     let mut archive=ZipArchive::new(File::open(path).map_err(|e|e.to_string())?)
         .map_err(|e|e.to_string())?;
+    if archive.len()>4096 {return Err("plus de 4096 fichiers JAR".into());}
+    let mut names=HashSet::new();
+    for index in 0..archive.len(){
+        let entry=archive.by_index(index).map_err(|e|e.to_string())?;
+        let name=entry.name();
+        let path_ok = !name.is_empty() && name.len()<=512 && !name.starts_with('/')
+            && !name.contains('\\') && !name.contains(':') && !name.contains('\0')
+            && name.trim_end_matches('/').split('/').all(|part|!part.is_empty()&&part!="."&&part!="..");
+        if !path_ok {return Err("nom de fichier JAR non sur".into());}
+        if !names.insert(name.to_owned()) {return Err("entree ZIP dupliquee".into());}
+        if entry.unix_mode().is_some_and(|mode| mode & 0o170000 == 0o120000){
+            return Err("lien symbolique refuse dans JAR".into());
+        }
+        if name.ends_with(".class") && entry.size()>16*1024*1024{
+            return Err("classe Java individuelle trop volumineuse".into());
+        }
+    }
     let mut text=String::new();
     let file=archive.by_name("fabric.mod.json").map_err(|_|"fabric.mod.json absent".to_owned())?;
     if file.size()>65536 {return Err("manifest trop volumineux".into());}
@@ -80,6 +100,33 @@ fn read_entrypoints(path:&Path)->Result<(String,Vec<(String,String)>),String>{
     let meta:serde_json::Value=serde_json::from_str(&text).map_err(|e|e.to_string())?;
     let id=meta["id"].as_str().unwrap_or("");
     if !valid_id(id) {return Err("id Fabric non pris en charge".into());}
+    // Fail closed: a successfully opened JAR is not necessarily runnable.
+    // Mixins target Java Minecraft classes that do not exist in Horizon Rust;
+    // access wideners and nested libraries cannot be silently ignored either.
+    if !meta.is_object(){return Err("fabric.mod.json doit etre un objet".into());}
+    if meta["environment"].as_str()==Some("server") {
+        return Err("mod serveur uniquement: instance native cliente".into());
+    }
+    if meta["mixins"].as_array().is_some_and(|m|!m.is_empty())
+        || meta["mixins"].as_str().is_some() {
+        return Err("mixins Fabric declares: transformation Java/Minecraft NON prise en charge".into());
+    }
+    if meta["accessWidener"].as_str().is_some() {
+        return Err("accessWidener declare: non pris en charge".into());
+    }
+    if meta["jars"].as_array().is_some_and(|j|!j.is_empty()) {
+        return Err("JARs embarques declares: dependances non resolues".into());
+    }
+    if let Some(deps)=meta["depends"].as_object(){
+        for key in deps.keys(){
+            if !matches!(key.as_str(),"minecraft"|"fabricloader"|"java") {
+                return Err(format!("dependance non prise en charge: {key}"));
+            }
+        }
+    }
+    if meta["entrypoints"]["preLaunch"].as_array().is_some_and(|e|!e.is_empty()){
+        return Err("entrypoint preLaunch non pris en charge".into());
+    }
     let mut entries=Vec::new();
     for kind in ["main","client"] {
         if let Some(values)=meta["entrypoints"][kind].as_array(){
@@ -291,18 +338,35 @@ fn execute(jar:&Path,entries:&[(String,String)])->Result<(),String>{
     thread::spawn(move ||{
         // Java output is always untrusted. Read in bounded 2048-byte chunks.
         let mut reader=BufReader::new(stdout);
+        // Do not use read_until: a malicious JAR can print an unbounded line
+        // without a newline and exhaust Horizon's memory.
         let mut buffer=Vec::with_capacity(256);
         loop{
             buffer.clear();
-            match reader.read_until(b'\n',&mut buffer){
-                Ok(0)|Err(_)=>break,
-                Ok(_)=>{
-                    if buffer.len()>2048 {continue;}
-                    let Ok(line)=std::str::from_utf8(&buffer) else {continue;};
+            let mut too_long=false;
+            loop {
+                let Ok(chunk)=reader.fill_buf() else {return;};
+                if chunk.is_empty() {return;}
+                let newline=chunk.iter().position(|c|*c==b'\n');
+                let count=newline.map_or(chunk.len(),|i|i+1);
+                if !too_long {
+                    if count<=2048usize.saturating_sub(buffer.len()) {
+                        buffer.extend_from_slice(&chunk[..count]);
+                    } else {too_long=true;}
+                }
+                reader.consume(count);
+                if newline.is_some() {break;}
+            }
+            if !too_long {
+                if let Ok(line)=std::str::from_utf8(&buffer) {;
                     if let Some((name,reply))=parse_command(line.trim_end_matches(['\r','\n'])) {
                         if let Ok(mut s)=state().lock(){
                             if s.generation==generation && s.commands.len()<MAX_COMMANDS {
-                                s.commands.entry(name).or_insert(reply);
+                                // Do not allow a JAR to shadow Horizon's own commands
+                                // or the bridge control endpoint.
+                                if !matches!(name.as_str(),"fabricbridge"|"help"|"list"|"trust"){
+                                    s.commands.entry(name).or_insert(reply);
+                                }
                             }
                         }
                     }
@@ -353,8 +417,45 @@ mod tests {
     #[test]
     fn validates_fabric_classes(){
         assert!(valid_class("example.MyFabricMod"));
+        assert!(valid_id("fabric-api"));
+        assert!(!valid_id("../evil"));
         assert!(!valid_class("example::init"));
         assert!(!valid_class("../evil"));
+    }
+    #[test]
+    fn rejects_unsupported_loader_features_and_unsafe_zip_before_java(){
+        let root=std::env::temp_dir().join(format!("fabricbridge-metadata-test-{}",std::process::id()));
+        let _=fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        for (name,manifest,extra,expected) in [
+            ("mixin",r#"{"id":"mixin","entrypoints":{"main":["x.Mod"]},"mixins":["x.mixins.json"]}"#,None,"mixins Fabric"),
+            ("depends",r#"{"id":"depends","entrypoints":{"main":["x.Mod"]},"depends":{"fabric-api":"*"}}"#,None,"dependance non prise"),
+            ("widener",r#"{"id":"widener","entrypoints":{"main":["x.Mod"]},"accessWidener":"some.accesswidener"}"#,None,"accessWidener"),
+            ("nested",r#"{"id":"nested","entrypoints":{"main":["x.Mod"]},"jars":[{"file":"META-INF/jarjar/embedded.jar"}]}"#,None,"embarques"),
+            ("traversal",r#"{"id":"traversal","entrypoints":{"main":["x.Mod"]}}"#,Some("../evil.class"),"nom de fichier JAR"),
+        ] {
+            let jar=root.join(format!("{name}.jar"));
+            let mut zip=ZipWriter::new(File::create(&jar).unwrap());
+            zip.start_file("fabric.mod.json",SimpleFileOptions::default()).unwrap();
+            zip.write_all(manifest.as_bytes()).unwrap();
+            if let Some(path)=extra {
+                zip.start_file(path,SimpleFileOptions::default()).unwrap();
+                zip.write_all(b"test").unwrap();
+            }
+            zip.finish().unwrap();
+            let error=read_entrypoints(&jar).unwrap_err();
+            assert!(error.contains(expected),"{name}: {error}");
+        }
+        let _=fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn java_output_protocol_refuses_malformed_records(){
+        assert_eq!(parse_command("HBR1\tfoo\tbar"),Some(("foo".into(),"bar".into())));
+        assert!(parse_command("HBR1\tbad-name\tno").is_none());
+        assert!(parse_command("HBR1\tfoo").is_none());
+        assert!(parse_command("ordinary stdout line").is_none());
+        assert!(parse_command(&format!("HBR1\tfoo\t{}", "x".repeat(721))).is_none());
     }
     #[test]
     fn runs_actual_fabric_initializer_and_exposes_command(){
