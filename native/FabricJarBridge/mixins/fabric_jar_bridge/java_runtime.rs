@@ -159,7 +159,7 @@ fn read_entrypoints(path:&Path)->Result<(String,Vec<(String,String)>),String>{
                     _=>return Err(format!("entrypoint {kind}: format invalide")),
                 };
                 if !valid_class(class) {return Err(format!("entrypoint {kind}: classe invalide"));}
-                let class_path=format!("{}.class",class.replace('.','/'));
+                let class_path=format!("{}.class",class.replace('.',"/"));
                 if !names.contains(&class_path) {
                     return Err(format!("entrypoint {kind}: classe absente du JAR: {class}"));
                 }
