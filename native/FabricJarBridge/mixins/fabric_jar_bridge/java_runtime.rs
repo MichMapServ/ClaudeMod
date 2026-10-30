@@ -631,8 +631,18 @@ fn shim_files()->[(&'static str,&'static str);10]{
     ]
 }
 fn shim()->Result<PathBuf,String>{
+    // Cache identity follows the actual Java sources; stale v0.3 classfiles
+    // cannot be reused after new loader APIs or the READY protocol change.
+    let mut fingerprint=Sha256::new();
+    for (path,source) in shim_files() {
+        fingerprint.update(path.as_bytes());
+        fingerprint.update([0u8]);
+        fingerprint.update(source.as_bytes());
+        fingerprint.update([0u8]);
+    }
+    let identity=format!("{:x}",fingerprint.finalize());
     let dir=std::env::current_dir().unwrap_or_default()
-        .join(".horizon-cache/fabric-jar-bridge/java-shim-v03");
+        .join(".horizon-cache/fabric-jar-bridge").join(format!("java-shim-{}", &identity[..24]));
     let classes=dir.join("classes");
     if classes.join("dev/horizon/fabricbridge/Runner.class").is_file() {return Ok(classes);}
     let mut files=Vec::new();
@@ -883,6 +893,12 @@ pub fn inspect_and_run_all(jars:&[PathBuf])->Vec<String>{
 mod tests {
     use super::*;
     use zip::{ZipWriter,write::SimpleFileOptions};
+    #[test]
+    fn shim_cache_is_versioned_by_java_sources(){
+        let sources=shim_files();
+        assert!(sources.iter().any(|(name,code)|name.ends_with("FabricLoader.java") && code.contains("isModLoaded")));
+        assert!(sources.iter().any(|(name,code)|name.ends_with("Runner.java") && code.contains("HBR1\\tREADY\\tOK")));
+    }
     #[test]
     fn validates_fabric_classes(){
         assert!(valid_class("example.MyFabricMod"));
