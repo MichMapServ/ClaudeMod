@@ -62,7 +62,8 @@ pub fn trust(id:&str)->String {
 }
 fn valid_id(s:&str)->bool {
     !s.is_empty() && s.len()<=64
-        && s.bytes().all(|b|b.is_ascii_lowercase()||b.is_ascii_digit()||b==b'_')
+        && s.bytes().next().is_some_and(|c|c.is_ascii_lowercase())
+        && s.bytes().all(|b|b.is_ascii_lowercase()||b.is_ascii_digit()||b==b'_'||b==b'-')
 }
 fn valid_class(s:&str)->bool {
     !s.is_empty() && s.len()<=180 && !s.starts_with('.') && !s.ends_with('.')
@@ -416,6 +417,8 @@ mod tests {
     #[test]
     fn validates_fabric_classes(){
         assert!(valid_class("example.MyFabricMod"));
+        assert!(valid_id("fabric-api"));
+        assert!(!valid_id("../evil"));
         assert!(!valid_class("example::init"));
         assert!(!valid_class("../evil"));
     }
