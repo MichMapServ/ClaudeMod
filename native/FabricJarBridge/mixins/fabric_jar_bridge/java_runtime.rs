@@ -176,9 +176,12 @@ fn sha(path:&Path)->Result<String,String>{
     let mut file=File::open(path).map_err(|e|e.to_string())?;
     let mut hash=Sha256::new();
     let mut buf=[0u8;65536];
+    let mut total=0u64;
     loop {
         let n=file.read(&mut buf).map_err(|e|e.to_string())?;
         if n==0 {break;}
+        total=total.saturating_add(n as u64);
+        if total>128*1024*1024 {return Err("JAR depasse 128 MiB pendant le hachage".into());}
         hash.update(&buf[..n]);
     }
     Ok(format!("{:x}",hash.finalize()))
@@ -209,7 +212,8 @@ fn approved_snapshot(source:&Path, expected:&str, cache:&Path)->Result<PathBuf,S
         let mut input=File::open(source).map_err(|e|e.to_string())?;
         let mut output=fs::OpenOptions::new().write(true).create_new(true)
             .open(&tmp).map_err(|e|e.to_string())?;
-        let bytes=std::io::copy(&mut input,&mut output).map_err(|e|e.to_string())?;
+        let bytes=std::io::copy(&mut input.take(128*1024*1024+1),&mut output)
+            .map_err(|e|e.to_string())?;
         if bytes>128*1024*1024 {return Err("copie JAR trop volumineuse".into());}
         output.sync_all().map_err(|e|e.to_string())?;
         drop(output);
