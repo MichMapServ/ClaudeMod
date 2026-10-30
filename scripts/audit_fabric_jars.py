@@ -14,12 +14,18 @@ import json
 import re
 from pathlib import Path, PurePosixPath
 from zipfile import ZipFile, BadZipFile
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fabric_bytecode_inspector import references, unsupported_java_api, BadClassfile
 
 MAX_JAR = 128 * 1024 * 1024
 MAX_ENTRIES = 4096
 MAX_META = 65536
 MAX_RESOURCE = 8 * 1024 * 1024
 MAX_RESOURCE_TOTAL = 64 * 1024 * 1024
+MAX_CLASS_ANALYZE = 512 * 1024
+MAX_BYTECODE_ANALYZE = 8 * 1024 * 1024
+MAX_CLASS_FILES = 256
 FABRIC_ID = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 HORIZON_ID = re.compile(r"^[a-z0-9_]{1,64}$")
 ALLOWED_TOP = ("assets", "data")
@@ -69,7 +75,7 @@ def audit(path: Path) -> dict:
         "file": str(path), "format": "unknown", "id": None, "version": None,
         "sha256": None, "entrypoints": [], "java_classes": 0,
         "resource_candidates": 0, "classfile_major_versions": [],
-        "dependencies": {}, "mixins": [], "issues": [],
+        "dependencies": {}, "mixins": [], "unsupported_java_api": [], "issues": [],
         "execution": "not_evaluated", "resources": "not_evaluated",
     }
     issues = result["issues"]
@@ -160,6 +166,9 @@ def audit(path: Path) -> dict:
                 issue(issues, "warning", "mixin_config_present", "Configuration Mixin presente dans le JAR")
             total = 0
             versions = set()
+            refs = set()
+            bytecode_analyzed = 0
+            classes_analyzed = 0
             for entry in info:
                 name = entry.filename
                 if name.endswith(".class"):
@@ -169,6 +178,18 @@ def audit(path: Path) -> dict:
                             header = stream.read(8)
                         if header[:4] == b"\xca\xfe\xba\xbe":
                             versions.add(int.from_bytes(header[6:8], "big"))
+                    if (classes_analyzed < MAX_CLASS_FILES
+                            and entry.file_size <= MAX_CLASS_ANALYZE
+                            and bytecode_analyzed + entry.file_size <= MAX_BYTECODE_ANALYZE):
+                        with z.open(entry) as stream:
+                            content = stream.read(MAX_CLASS_ANALYZE + 1)
+                        bytecode_analyzed += len(content)
+                        classes_analyzed += 1
+                        try:
+                            _, class_references = references(content)
+                            refs.update(class_references)
+                        except BadClassfile:
+                            pass
                     continue
                 if not (name.startswith("assets/") or name.startswith("data/")) or entry.is_dir():
                     continue
@@ -184,6 +205,13 @@ def audit(path: Path) -> dict:
                 total += entry.file_size
                 result["resource_candidates"] += 1
             result["classfile_major_versions"] = sorted(versions)
+            missing = unsupported_java_api(refs)
+            result["unsupported_java_api"] = sorted(missing)[:60]
+            if missing:
+                issue(issues, "warning", "missing_java_api", f"{len(missing)} reference(s) a des classes Minecraft/Fabric/Mixin non implementees; le lancement peut echouer")
+            if classes_analyzed < result["java_classes"]:
+                issue(issues, "info", "partial_bytecode_scan",
+                      f"Analyse bornee: {classes_analyzed}/{result['java_classes']} classes inspectees")
             if total > MAX_RESOURCE_TOTAL:
                 issue(issues, "blocker", "resource_total", "Total de ressources trop volumineux")
             if not eps:
