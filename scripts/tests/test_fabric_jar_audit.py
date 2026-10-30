@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import struct
 from pathlib import Path
 import tempfile
 import unittest
@@ -35,6 +36,24 @@ class FabricJarAuditTests(unittest.TestCase):
             self.assertEqual(report["resource_candidates"], 1)
             self.assertEqual(report["classfile_major_versions"], [65])
             self.assertIsNotNone(report["sha256"])
+
+    def test_bytecode_missing_minecraft_api_is_reported_without_execution(self):
+        name = b"net/minecraft/world/World"
+        classfile = (b"\xca\xfe\xba\xbe"
+                     + struct.pack(">HHH", 0, 65, 3)
+                     + b"\x01" + struct.pack(">H", len(name)) + name
+                     + b"\x07\x00\x01")
+        with tempfile.TemporaryDirectory() as d:
+            jar = Path(d) / "unsupported.jar"
+            make_jar(jar, {
+                "id": "unsupported", "version": "1",
+                "entrypoints": {"main": ["test.Entry"]}
+            }, {"test/Entry.class": classfile})
+            report = audit_mod.audit(jar)
+            self.assertEqual(report["format"], "fabric")
+            self.assertIn("net/minecraft/world/World", report["unsupported_java_api"])
+            self.assertIn("missing_java_api", [x["code"] for x in report["issues"]])
+            self.assertEqual(report["execution"], "candidate_only")
 
     def test_mixin_and_dependency_are_explicit_blockers(self):
         with tempfile.TemporaryDirectory() as d:
