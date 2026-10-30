@@ -16,6 +16,8 @@ Fabric mod compatibility.
    SHA-256 (arbitrary Java code privileges!) and requires a restart.
 6. Restart the native game. Type \`/javaproof\`.
    Expected reply: "Java Fabric execute dans Horizon !".
+7. Enter a world and wait one tick, then type `/javapos`.
+   It prints the player block coordinates captured by a Java `ClientTickEvents.END_CLIENT_TICK` callback from actual Horizon player state.
 
 Do **not** use this to judge AppleSkin, Sodium or other Java mods: no Java
 Minecraft class mappings, Fabric API modules or Mixins exist in this proof.
