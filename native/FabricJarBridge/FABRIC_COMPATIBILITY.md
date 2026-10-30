@@ -46,3 +46,5 @@ This file describes code actually implemented in this branch, not a universal Fa
 
 - Supported: graph of local approved JARs, common JVM classpath, deterministic topological order, library-only JAR, duplicate IDs/classes guard, `depends` and `breaks`/`conflicts`, version predicates numeric `*`, exact, comparisons, caret/tilde and conjunctions.
 - Not supported: Fabric Loader language adapters, full SemVer prereleases, Fabric wildcard range syntax, nested JAR resolution, Fabric Loader API and Minecraft Java. Unsupported constraints fail closed. Approval SHA-256 per dependency remains mandatory.
+
+- `net.fabricmc.loader.api.FabricLoader` (méthodes `getInstance`, `isModLoaded`, chemins jeu/config, environnement CLIENT, version brute) : **sous-ensemble ajouté en 0.4.0**, construit depuis la liste de JARs SHA-256 validés. Le reste de l'interface Fabric Loader est **non implémenté**.

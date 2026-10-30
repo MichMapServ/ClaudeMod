@@ -47,6 +47,8 @@ class FabricJarBridgePackageTests(unittest.TestCase):
         self.assertIn("fn execute(jar:", java)
         self.assertIn("fn execute_group(", java)
         self.assertIn("fn plan_mods(", java)
+        self.assertIn("net/fabricmc/loader/api/FabricLoader.java", java)
+        self.assertIn("fabricbridge.mods=", java)
         self.assertIn("inspect_and_run_all", files["mixins/fabric_jar_bridge/runtime.rs"].decode())
         self.assertIn("fn actual_client_tick_event_uses_live_horizon_position()", java)
         self.assertIn("native_player()", files["mixins/fabric_jar_bridge/tick.rs"].decode())

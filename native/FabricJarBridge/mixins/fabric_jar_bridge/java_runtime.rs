@@ -364,6 +364,7 @@ fn class_collisions(paths:&[PathBuf])->Result<(),String>{
             }
             if name.starts_with("dev/horizon/fabricbridge/")
                 || name.starts_with("net/fabricmc/api/")
+                || name.starts_with("net/fabricmc/loader/api/")
                 || name.starts_with("net/minecraft/client/")
                 || name=="net/minecraft/util/math/BlockPos.class"
                 || name.starts_with("net/fabricmc/fabric/api/client/event/lifecycle/v1/") {
@@ -546,6 +547,41 @@ public final class ClientTickEvents {
     }
 }
 "#;
+// Source-compatible subset of Fabric Loader's public interface. These APIs
+// are backed by the already approved native load plan; this is NOT Fabric Loader.
+const ENV_TYPE:&str="package net.fabricmc.api; public enum EnvType { CLIENT, SERVER }\n";
+const FABRIC_LOADER:&str=r#"package net.fabricmc.loader.api;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Set;
+import net.fabricmc.api.EnvType;
+public interface FabricLoader {
+    static FabricLoader getInstance(){return Holder.INSTANCE;}
+    boolean isModLoaded(String id);
+    boolean isDevelopmentEnvironment();
+    EnvType getEnvironmentType();
+    Path getGameDir();
+    Path getConfigDir();
+    String getRawGameVersion();
+    final class Holder {
+        static final FabricLoader INSTANCE=new NativeView();
+    }
+    final class NativeView implements FabricLoader {
+        private final Set<String> ids=new HashSet<>(
+            Arrays.asList(System.getProperty("fabricbridge.mods","").split(",")));
+        public boolean isModLoaded(String id){
+            return "minecraft".equals(id) || ids.contains(id);
+        }
+        public boolean isDevelopmentEnvironment(){return false;}
+        public EnvType getEnvironmentType(){return EnvType.CLIENT;}
+        public Path getGameDir(){return Paths.get("").toAbsolutePath().normalize();}
+        public Path getConfigDir(){return getGameDir().resolve("config");}
+        public String getRawGameVersion(){return "26.3";}
+    }
+}
+"#;
 const RUNNER: &str=r#"package dev.horizon.fabricbridge;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.api.ClientModInitializer;
@@ -577,10 +613,12 @@ public final class Runner {
     }
 }
 "#;
-fn shim_files()->[(&'static str,&'static str);8]{
+fn shim_files()->[(&'static str,&'static str);10]{
     [
         ("net/fabricmc/api/ModInitializer.java",MOD),
         ("net/fabricmc/api/ClientModInitializer.java",CLIENT),
+        ("net/fabricmc/api/EnvType.java",ENV_TYPE),
+        ("net/fabricmc/loader/api/FabricLoader.java",FABRIC_LOADER),
         ("dev/horizon/fabricbridge/HorizonBridge.java",API),
         ("dev/horizon/fabricbridge/Runner.java",RUNNER),
         ("net/minecraft/util/math/BlockPos.java",BLOCK_POS),
@@ -642,6 +680,13 @@ fn execute_group(mods:&[(PathBuf,Vec<(String,String)>)])->Result<(),String>{
         return Err("chemin JVM shim contenant un separateur classpath".into());
     }
     let mut cmd=Command::new("java");
+    // Only SHA-verified, selected mod IDs are exposed to the Java facade.
+    let ids=mods.iter().map(|(p,_)|p).collect::<Vec<_>>();
+    let mut verified_ids=Vec::new();
+    for path in ids {
+        verified_ids.push(read_entrypoints(path)?.0);
+    }
+    cmd.arg(format!("-Dfabricbridge.mods={}",verified_ids.join(",")));
     cmd.arg("-cp").arg(classpath.join(&separator.to_string()))
         .arg("dev.horizon.fabricbridge.Runner");
     for (_,entries) in mods {
@@ -972,6 +1017,11 @@ mod tests {
             ("proof/GroupMod.java",r#"package proof;
 public class GroupMod implements net.fabricmc.api.ModInitializer {
     public void onInitialize() {
+        net.fabricmc.loader.api.FabricLoader loader=net.fabricmc.loader.api.FabricLoader.getInstance();
+        if (!loader.isModLoaded("library") || !loader.isModLoaded("consumer")
+            || loader.isModLoaded("absent")
+            || loader.getEnvironmentType()!=net.fabricmc.api.EnvType.CLIENT)
+            throw new IllegalStateException("FabricLoader native facade");
         dev.horizon.fabricbridge.HorizonBridge.registerCommand("groupok",library.Helper.hello());
     }
 }"#)
@@ -1003,7 +1053,8 @@ public class GroupMod implements net.fabricmc.api.ModInitializer {
         let sep=if cfg!(windows){';'}else{':'};
         let cp=format!("{}{}{}{}{}",classes.display(),sep,
             dir.join("library.jar").display(),sep,dir.join("consumer.jar").display());
-        let output=Command::new("java").arg("-cp").arg(cp).arg("dev.horizon.fabricbridge.Runner")
+        let output=Command::new("java").arg("-Dfabricbridge.mods=library,consumer")
+            .arg("-cp").arg(cp).arg("dev.horizon.fabricbridge.Runner")
             .arg("main").arg("proof.GroupMod").output().unwrap();
         assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
         assert!(String::from_utf8_lossy(&output.stdout).contains("HBR1\tgroupok\tdep-loaded"));
