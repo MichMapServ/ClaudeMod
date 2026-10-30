@@ -1,0 +1,103 @@
+name: fabric-jar-bridge
+on:
+  pull_request:
+    paths:
+      - "native/FabricJarBridge/**"
+      - "scripts/build_fabric_jar_bridge.py"
+      - "scripts/tests/test_fabric_jar_bridge.py"
+      - ".github/workflows/fabric-jar-bridge.yml"
+  push:
+    branches: [main]
+    paths:
+      - "native/FabricJarBridge/**"
+      - "scripts/build_fabric_jar_bridge.py"
+      - "scripts/tests/test_fabric_jar_bridge.py"
+      - ".github/workflows/fabric-jar-bridge.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: fabric-bridge-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate and build exact source archive
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s scripts/tests -p 'test_fabric_jar_bridge.py' -v
+          python3 scripts/build_fabric_jar_bridge.py pack
+          python3 scripts/build_fabric_jar_bridge.py verify
+          (cd dist && sha256sum -c FabricJarBridge.hnmod.sha256)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FabricJarBridge-hnmod
+          path: |
+            dist/FabricJarBridge.hnmod
+            dist/FabricJarBridge.hnmod.sha256
+          if-no-files-found: error
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      RUSTUP_TOOLCHAIN: "1.99.1"
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust and system libraries
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev pkg-config
+      - name: Read source revisions
+        id: refs
+        run: |
+          python3 - <<'PY'
+          import json,os
+          c=json.load(open("native/FabricJarBridge/compatibility.json"))
+          with open(os.environ["GITHUB_OUTPUT"],"a") as f:
+              f.write("HORIZON="+c["horizon_revision"]+"\n")
+              f.write("MIXINS="+c["horizon_mixins_revision"]+"\n")
+          PY
+      - name: Checkout exact Horizon revision
+        env:
+          REV: ${{ steps.refs.outputs.HORIZON }}
+        run: |
+          set -euo pipefail
+          git init "$RUNNER_TEMP/horizon"
+          git -C "$RUNNER_TEMP/horizon" remote add origin https://github.com/horizon-rust/horizon.git
+          git -C "$RUNNER_TEMP/horizon" fetch --depth 1 origin "$REV"
+          git -C "$RUNNER_TEMP/horizon" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/horizon" rev-parse HEAD)" = "$REV"
+          rm -rf "$RUNNER_TEMP/horizon/.git"
+          find "$RUNNER_TEMP/horizon" -type l -delete
+          printf '%s' "$REV" > "$RUNNER_TEMP/horizon/.horizon-revision"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: horizon-fabric-bridge-1.99.1
+      - name: Install exact Horizon Mixins version
+        env:
+          REV: ${{ steps.refs.outputs.MIXINS }}
+        run: cargo install --locked --git https://github.com/horizon-rust/horizon-mixins --rev "$REV" horizon-mixins-cli
+      - name: Apply source mixins
+        run: horizon-mixins apply --workspace "$RUNNER_TEMP/horizon" --mods "$GITHUB_WORKSPACE/native/FabricJarBridge/mixins" --out "$RUNNER_TEMP/staged-horizon"
+      - name: Check injected client
+        working-directory: ${{ runner.temp }}/staged-horizon
+        run: cargo check --locked --no-default-features -p horizon-client --bin horizon-client
+      - name: Run real bridge tests on compiled client
+        working-directory: ${{ runner.temp }}/staged-horizon
+        run: cargo test --locked --no-default-features -p horizon-client --bin horizon-client fabric_jar_bridge::tests
+  gate:
+    if: always()
+    needs: [package, native]
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          PACKAGE: ${{ needs.package.result }}
+          NATIVE: ${{ needs.native.result }}
+        run: test "$PACKAGE" = success && test "$NATIVE" = success
