@@ -183,6 +183,46 @@ fn sha(path:&Path)->Result<String,String>{
     }
     Ok(format!("{:x}",hash.finalize()))
 }
+// Run Java only from an SHA-256 verified snapshot. A source JAR can be
+// changed between trust lookup and java -cp; direct execution of that path
+// would then run bytecode not covered by the approved SHA-256.
+fn approved_snapshot(source:&Path, expected:&str, cache:&Path)->Result<PathBuf,String>{
+    if expected.len()!=64 || !expected.bytes().all(|b|b.is_ascii_hexdigit()) {
+        return Err("empreinte SHA-256 invalide".into());
+    }
+    if sha(source)?!=expected {
+        return Err("JAR modifie depuis la verification SHA-256".into());
+    }
+    fs::create_dir_all(cache).map_err(|e|e.to_string())?;
+    let target=cache.join(format!("{expected}.jar"));
+    if target.exists() {
+        if sha(&target)?!=expected {
+            return Err("cache Java modifie: supprimer la copie corrompue".into());
+        }
+        return Ok(target);
+    }
+    // create_new makes the temporary path fail closed if another process
+    // has pre-created it (including as a symlink). Rename publishes only
+    // after the full copy has passed SHA-256 verification.
+    let tmp=cache.join(format!(".{expected}-{}.tmp",std::process::id()));
+    let outcome=(||->Result<(),String>{
+        let mut input=File::open(source).map_err(|e|e.to_string())?;
+        let mut output=fs::OpenOptions::new().write(true).create_new(true)
+            .open(&tmp).map_err(|e|e.to_string())?;
+        let bytes=std::io::copy(&mut input,&mut output).map_err(|e|e.to_string())?;
+        if bytes>128*1024*1024 {return Err("copie JAR trop volumineuse".into());}
+        output.sync_all().map_err(|e|e.to_string())?;
+        drop(output);
+        if sha(&tmp)?!=expected {
+            return Err("JAR modifie pendant la copie: execution refusee".into());
+        }
+        fs::rename(&tmp,&target).map_err(|e|e.to_string())?;
+        Ok(())
+    })();
+    if outcome.is_err(){let _=fs::remove_file(&tmp);}
+    outcome.map(|()|target)
+}
+
 // Continuously drain both pipes while javac runs. Waiting for process exit
 // before reading a pipe deadlocks when the compiler emits more than the OS
 // pipe buffer. Capture at most 64 KiB per pipe while draining all bytes.
@@ -461,7 +501,20 @@ pub fn inspect_and_run(jar:&Path)->String{
     if !trusted(&id,&hash) {
         return format!("Java NON execute (securite). /fabricbridge trust {id}, puis redemarrage");
     }
-    match execute(jar,&entries){
+    let cache=std::env::current_dir().unwrap_or_default()
+        .join(".horizon-cache/fabric-jar-bridge/java-approved");
+    let snapshot=match approved_snapshot(jar,&hash,&cache) {
+        Ok(file)=>file,Err(e)=>return format!("Java refuse (copie verifiee): {e}"),
+    };
+    // Do not trust entrypoints read before snapshotting; a replacement JAR
+    // might have been swapped in between the first read and SHA-256.
+    let (snapshot_id,snapshot_entries)=match read_entrypoints(&snapshot) {
+        Ok(value)=>value,Err(e)=>return format!("Java refuse (copie invalide): {e}"),
+    };
+    if snapshot_id!=id || snapshot_entries!=entries {
+        return "Java refuse: metadonnees changees pendant la verification".into();
+    }
+    match execute(&snapshot,&snapshot_entries){
         Ok(())=>format!("JVM lancee: {} entrypoint(s), ClientTickEvents.END_CLIENT_TICK actif (si enregistre)",entries.len()),
         Err(e)=>format!("Java echec/incompatibilite: {e}"),
     }
@@ -540,6 +593,23 @@ mod tests {
             assert!(error.contains(expected),"{name}: {error}");
         }
         let _=fs::remove_dir_all(root);
+    }
+    #[test]
+    fn approved_snapshot_is_hash_pinned_and_rejects_changed_jar(){
+        let root=std::env::temp_dir().join(format!("fabricbridge-snapshot-test-{}",std::process::id()));
+        let _=fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let original=root.join("example.jar");
+        fs::write(&original,b"approved bytes").unwrap();
+        let expected=sha(&original).unwrap();
+        let dest=approved_snapshot(&original,&expected,&root.join("cache")).unwrap();
+        assert_eq!(sha(&dest).unwrap(),expected);
+        fs::write(&original,b"replaced bytes").unwrap();
+        assert!(approved_snapshot(&original,&expected,&root.join("cache")).is_err());
+        fs::write(&original,b"approved bytes").unwrap();
+        fs::write(&dest,b"cache tampered").unwrap();
+        assert!(approved_snapshot(&original,&expected,&root.join("cache")).is_err());
+        let _=fs::remove_dir_all(&root);
     }
     #[test]
     fn bounded_jdk_output_does_not_deadlock_on_large_pipes(){
