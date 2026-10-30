@@ -71,14 +71,15 @@ fn valid_class(s:&str)->bool {
         && s.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'.'||b==b'_'||b==b'$')
 }
 fn read_entrypoints(path:&Path)->Result<(String,Vec<(String,String)>),String>{
-    if fs::metadata(path).map_err(|e|e.to_string())?.len()>128*1024*1024{
+    if fs::metadata(path).map_err(|e|e.to_string())?.len()>128*1024*1024 {
         return Err("JAR depasse 128 MiB".into());
     }
     let mut archive=ZipArchive::new(File::open(path).map_err(|e|e.to_string())?)
         .map_err(|e|e.to_string())?;
     if archive.len()>4096 {return Err("plus de 4096 fichiers JAR".into());}
     let mut names=HashSet::new();
-    for index in 0..archive.len(){
+    let mut inflated=0u64;
+    for index in 0..archive.len() {
         let entry=archive.by_index(index).map_err(|e|e.to_string())?;
         let name=entry.name();
         let path_ok = !name.is_empty() && name.len()<=512 && !name.starts_with('/')
@@ -86,11 +87,20 @@ fn read_entrypoints(path:&Path)->Result<(String,Vec<(String,String)>),String>{
             && name.trim_end_matches('/').split('/').all(|part|!part.is_empty()&&part!="."&&part!="..");
         if !path_ok {return Err("nom de fichier JAR non sur".into());}
         if !names.insert(name.to_owned()) {return Err("entree ZIP dupliquee".into());}
-        if entry.unix_mode().is_some_and(|mode| mode & 0o170000 == 0o120000){
+        if entry.unix_mode().is_some_and(|mode| mode & 0o170000 == 0o120000) {
             return Err("lien symbolique refuse dans JAR".into());
         }
-        if name.ends_with(".class") && entry.size()>16*1024*1024{
+        if name.ends_with(".class") && entry.size()>16*1024*1024 {
             return Err("classe Java individuelle trop volumineuse".into());
+        }
+        // Metadata is checked before launching Java; an attacker must not be
+        // able to hide a multi-GiB archive behind a tiny compressed ZIP.
+        if entry.size()>64*1024*1024 {return Err("entree ZIP trop volumineuse".into());}
+        inflated=inflated.saturating_add(entry.size());
+        if inflated>256*1024*1024 {return Err("JAR decompresse depasse 256 MiB".into());}
+        if entry.size()>0 && (entry.compressed_size()==0
+            || entry.size()/entry.compressed_size()>500) {
+            return Err("ratio de compression ZIP suspect".into());
         }
     }
     let mut text=String::new();
@@ -98,79 +108,170 @@ fn read_entrypoints(path:&Path)->Result<(String,Vec<(String,String)>),String>{
     if file.size()>65536 {return Err("manifest trop volumineux".into());}
     file.take(65537).read_to_string(&mut text).map_err(|e|e.to_string())?;
     let meta:serde_json::Value=serde_json::from_str(&text).map_err(|e|e.to_string())?;
+    if !meta.is_object() {return Err("fabric.mod.json doit etre un objet".into());}
     let id=meta["id"].as_str().unwrap_or("");
     if !valid_id(id) {return Err("id Fabric non pris en charge".into());}
-    // Fail closed: a successfully opened JAR is not necessarily runnable.
-    // Mixins target Java Minecraft classes that do not exist in Horizon Rust;
-    // access wideners and nested libraries cannot be silently ignored either.
-    if !meta.is_object(){return Err("fabric.mod.json doit etre un objet".into());}
-    if meta["environment"].as_str()==Some("server") {
-        return Err("mod serveur uniquement: instance native cliente".into());
+    if let Some(environment)=meta.get("environment") {
+        if !matches!(environment.as_str(),Some("*"|"client")) {
+            return Err("environment non pris en charge (client requis)".into());
+        }
     }
-    if meta["mixins"].as_array().is_some_and(|m|!m.is_empty())
-        || meta["mixins"].as_str().is_some() {
+    // No Java class transformation, language adapters, dependency resolver,
+    // or custom lifecycle: reject them instead of running a partial mod.
+    if meta.get("mixins").is_some_and(|v|!v.as_array().is_some_and(|a|a.is_empty())) {
         return Err("mixins Fabric declares: transformation Java/Minecraft NON prise en charge".into());
     }
-    if meta["accessWidener"].as_str().is_some() {
+    if meta.get("accessWidener").is_some() {
         return Err("accessWidener declare: non pris en charge".into());
     }
-    if meta["jars"].as_array().is_some_and(|j|!j.is_empty()) {
+    if meta.get("jars").is_some_and(|v|!v.as_array().is_some_and(|a|a.is_empty())) {
         return Err("JARs embarques declares: dependances non resolues".into());
     }
-    if let Some(deps)=meta["depends"].as_object(){
-        for key in deps.keys(){
+    if let Some(deps)=meta.get("depends") {
+        let deps=deps.as_object().ok_or("depends doit etre un objet")?;
+        for key in deps.keys() {
             if !matches!(key.as_str(),"minecraft"|"fabricloader"|"java") {
                 return Err(format!("dependance non prise en charge: {key}"));
             }
         }
     }
-    if meta["entrypoints"]["preLaunch"].as_array().is_some_and(|e|!e.is_empty()){
-        return Err("entrypoint preLaunch non pris en charge".into());
-    }
     let mut entries=Vec::new();
-    for kind in ["main","client"] {
-        if let Some(values)=meta["entrypoints"][kind].as_array(){
-            for v in values {
-                let class=v.as_str().or_else(||{
-                    if v["adapter"].as_str().is_none_or(|a|a=="default") {
-                        v["value"].as_str()
-                    } else {None}
-                });
-                if let Some(c)=class.filter(|c|valid_class(c)) {
-                    entries.push((kind.to_owned(),c.to_owned()));
+    if let Some(raw)=meta.get("entrypoints") {
+        let groups=raw.as_object().ok_or("entrypoints doit etre un objet")?;
+        for (kind, values) in groups {
+            let values=values.as_array().ok_or_else(||format!("entrypoint {kind}: liste requise"))?;
+            if kind!="main" && kind!="client" {
+                if !values.is_empty() {
+                    return Err(format!("entrypoint {kind} non pris en charge"));
+                }
+                continue;
+            }
+            for value in values {
+                let class=match value {
+                    serde_json::Value::String(class)=>class.as_str(),
+                    serde_json::Value::Object(obj)=>{
+                        if obj.get("adapter").is_some_and(|value|value.as_str()!=Some("default")) {
+                            return Err(format!("entrypoint {kind}: adapter Java non pris en charge"));
+                        }
+                        obj.get("value").and_then(|v|v.as_str())
+                            .ok_or_else(||format!("entrypoint {kind}: classe invalide"))?
+                    }
+                    _=>return Err(format!("entrypoint {kind}: format invalide")),
+                };
+                if !valid_class(class) {return Err(format!("entrypoint {kind}: classe invalide"));}
+                let class_path=format!("{}.class",class.replace('.',"/"));
+                if !names.contains(&class_path) {
+                    return Err(format!("entrypoint {kind}: classe absente du JAR: {class}"));
+                }
+                entries.push((kind.to_owned(),class.to_owned()));
+                if entries.len()>MAX_ENTRYPOINTS {
+                    return Err("trop d'entrypoints".into());
                 }
             }
         }
     }
-    if entries.len()>MAX_ENTRYPOINTS {return Err("trop d'entrypoints".into());}
     Ok((id.to_owned(),entries))
 }
 fn sha(path:&Path)->Result<String,String>{
     let mut file=File::open(path).map_err(|e|e.to_string())?;
     let mut hash=Sha256::new();
     let mut buf=[0u8;65536];
+    let mut total=0u64;
     loop {
         let n=file.read(&mut buf).map_err(|e|e.to_string())?;
         if n==0 {break;}
+        total=total.saturating_add(n as u64);
+        if total>128*1024*1024 {return Err("JAR depasse 128 MiB pendant le hachage".into());}
         hash.update(&buf[..n]);
     }
     Ok(format!("{:x}",hash.finalize()))
 }
+// Run Java only from an SHA-256 verified snapshot. A source JAR can be
+// changed between trust lookup and java -cp; direct execution of that path
+// would then run bytecode not covered by the approved SHA-256.
+fn approved_snapshot(source:&Path, expected:&str, cache:&Path)->Result<PathBuf,String>{
+    if expected.len()!=64 || !expected.bytes().all(|b|b.is_ascii_hexdigit()) {
+        return Err("empreinte SHA-256 invalide".into());
+    }
+    if sha(source)?!=expected {
+        return Err("JAR modifie depuis la verification SHA-256".into());
+    }
+    fs::create_dir_all(cache).map_err(|e|e.to_string())?;
+    let target=cache.join(format!("{expected}.jar"));
+    if target.exists() {
+        if sha(&target)?!=expected {
+            return Err("cache Java modifie: supprimer la copie corrompue".into());
+        }
+        return Ok(target);
+    }
+    // create_new makes the temporary path fail closed if another process
+    // has pre-created it (including as a symlink). Rename publishes only
+    // after the full copy has passed SHA-256 verification.
+    let tmp=cache.join(format!(".{expected}-{}.tmp",std::process::id()));
+    let outcome=(||->Result<(),String>{
+        let mut input=File::open(source).map_err(|e|e.to_string())?;
+        let mut output=fs::OpenOptions::new().write(true).create_new(true)
+            .open(&tmp).map_err(|e|e.to_string())?;
+        let bytes=std::io::copy(&mut input.take(128*1024*1024+1),&mut output)
+            .map_err(|e|e.to_string())?;
+        if bytes>128*1024*1024 {return Err("copie JAR trop volumineuse".into());}
+        output.sync_all().map_err(|e|e.to_string())?;
+        drop(output);
+        if sha(&tmp)?!=expected {
+            return Err("JAR modifie pendant la copie: execution refusee".into());
+        }
+        fs::rename(&tmp,&target).map_err(|e|e.to_string())?;
+        Ok(())
+    })();
+    if outcome.is_err(){let _=fs::remove_file(&tmp);}
+    outcome.map(|()|target)
+}
+
+// Continuously drain both pipes while javac runs. Waiting for process exit
+// before reading a pipe deadlocks when the compiler emits more than the OS
+// pipe buffer. Capture at most 64 KiB per pipe while draining all bytes.
+fn drain_bounded<R: Read + Send + 'static>(mut source:R)->thread::JoinHandle<Vec<u8>> {
+    thread::spawn(move ||{
+        let mut captured=Vec::new();
+        let mut block=[0u8;8192];
+        loop {
+            match source.read(&mut block) {
+                Ok(0)|Err(_)=>break,
+                Ok(n)=>{
+                    let room=65536usize.saturating_sub(captured.len());
+                    captured.extend_from_slice(&block[..n.min(room)]);
+                }
+            }
+        }
+        captured
+    })
+}
 fn timed(mut cmd:Command, limit:Duration)->Result<Output,String>{
     let mut child=cmd.stdout(Stdio::piped()).stderr(Stdio::piped())
         .spawn().map_err(|e|format!("Java/JDK indisponible: {e}"))?;
+    let stdout=drain_bounded(child.stdout.take().ok_or("stdout JDK indisponible")?);
+    let stderr=drain_bounded(child.stderr.take().ok_or("stderr JDK indisponible")?);
     let start=Instant::now();
-    loop {
-        if child.try_wait().map_err(|e|e.to_string())?.is_some() {
-            return child.wait_with_output().map_err(|e|e.to_string());
+    let status=loop {
+        match child.try_wait() {
+            Ok(Some(status))=>break status,
+            Ok(None)=>{},
+            Err(e)=>{
+                let _=child.kill();
+                let _=child.wait();
+                return Err(e.to_string());
+            }
         }
         if start.elapsed()>limit {
             let _=child.kill();
             let _=child.wait();
             return Err(format!("delai Java depasse ({}s)",limit.as_secs()));
         }
-        thread::sleep(Duration::from_millis(100));
-    }
+        thread::sleep(Duration::from_millis(50));
+    };
+    let stdout=stdout.join().map_err(|_|"lecture stdout JDK interrompue")?;
+    let stderr=stderr.join().map_err(|_|"lecture stderr JDK interrompue")?;
+    Ok(Output{status,stdout,stderr})
 }
 
 // Source-compatible Fabric interfaces and a deliberately tiny Horizon API.
@@ -311,13 +412,17 @@ fn parse_command(line:&str)->Option<(String,String)>{
     let payload=line.strip_prefix("HBR1\t")?;
     let (name,reply)=payload.split_once('\t')?;
     if name.is_empty() || name.len()>32
+        || !name.as_bytes()[0].is_ascii_lowercase()
         || !name.bytes().all(|b|b.is_ascii_lowercase()||b.is_ascii_digit()||b==b'_')
-        || reply.len()>720 {return None;}
+        || reply.len()>720 || reply.chars().any(|c|c.is_control()) {return None;}
     Some((name.to_owned(),reply.to_owned()))
 }
 fn execute(jar:&Path,entries:&[(String,String)])->Result<(),String>{
     let classes=shim()?;
     let separator=if cfg!(windows){';'}else{':'};
+    if classes.to_string_lossy().contains(separator) || jar.to_string_lossy().contains(separator) {
+        return Err("chemin JVM contenant un separateur classpath: execution refusee".into());
+    }
     let classpath=format!("{}{}{}",classes.display(),separator,jar.display());
     let mut cmd=Command::new("java");
     cmd.arg("-cp").arg(&classpath).arg("dev.horizon.fabricbridge.Runner");
@@ -404,7 +509,20 @@ pub fn inspect_and_run(jar:&Path)->String{
     if !trusted(&id,&hash) {
         return format!("Java NON execute (securite). /fabricbridge trust {id}, puis redemarrage");
     }
-    match execute(jar,&entries){
+    let cache=std::env::current_dir().unwrap_or_default()
+        .join(".horizon-cache/fabric-jar-bridge/java-approved");
+    let snapshot=match approved_snapshot(jar,&hash,&cache) {
+        Ok(file)=>file,Err(e)=>return format!("Java refuse (copie verifiee): {e}"),
+    };
+    // Do not trust entrypoints read before snapshotting; a replacement JAR
+    // might have been swapped in between the first read and SHA-256.
+    let (snapshot_id,snapshot_entries)=match read_entrypoints(&snapshot) {
+        Ok(value)=>value,Err(e)=>return format!("Java refuse (copie invalide): {e}"),
+    };
+    if snapshot_id!=id || snapshot_entries!=entries {
+        return "Java refuse: metadonnees changees pendant la verification".into();
+    }
+    match execute(&snapshot,&snapshot_entries){
         Ok(())=>format!("JVM lancee: {} entrypoint(s), ClientTickEvents.END_CLIENT_TICK actif (si enregistre)",entries.len()),
         Err(e)=>format!("Java echec/incompatibilite: {e}"),
     }
@@ -453,9 +571,79 @@ mod tests {
     fn java_output_protocol_refuses_malformed_records(){
         assert_eq!(parse_command("HBR1\tfoo\tbar"),Some(("foo".into(),"bar".into())));
         assert!(parse_command("HBR1\tbad-name\tno").is_none());
+        assert!(parse_command("HBR1\t1bad\tno").is_none());
+        assert!(parse_command("HBR1\tgood\tcontrol\u{001b}[31m").is_none());
         assert!(parse_command("HBR1\tfoo").is_none());
         assert!(parse_command("ordinary stdout line").is_none());
         assert!(parse_command(&format!("HBR1\tfoo\t{}", "x".repeat(721))).is_none());
+    }
+    #[test]
+    fn rejects_invalid_entrypoint_instead_of_silently_skipping_it(){
+        let root=std::env::temp_dir().join(format!("fabricbridge-strict-{}",std::process::id()));
+        let _=fs::create_dir_all(&root);
+        for (name,manifest,expected) in [
+            ("adapter",r#"{"id":"strict","entrypoints":{"main":[{"adapter":"kotlin","value":"x.Mod"}]}}"#,"adapter"),
+            ("adapter_type",r#"{"id":"strict","entrypoints":{"main":[{"adapter":42,"value":"x.Mod"}]}}"#,"adapter"),
+            ("custom",r#"{"id":"strict","entrypoints":{"custom":["x.Mod"]}}"#,"non pris en charge"),
+            ("malformed",r#"{"id":"strict","entrypoints":{"main":[42]}}"#,"format invalide"),
+            ("absent",r#"{"id":"strict","entrypoints":{"main":["x.Mod"]}}"#,"classe absente"),
+            ("mixed",r#"{"id":"strict","entrypoints":{"main":["x.Mod",42]}}"#,"format invalide"),
+            ("bad_environment",r#"{"id":"strict","environment":"server"}"#,"environment"),
+            ("bad_depends",r#"{"id":"strict","depends":["missing"]}"#,"depends"),
+        ] {
+            let jar=root.join(format!("{name}.jar"));
+            let mut zip=ZipWriter::new(File::create(&jar).unwrap());
+            zip.start_file("fabric.mod.json",SimpleFileOptions::default()).unwrap();
+            zip.write_all(manifest.as_bytes()).unwrap();
+            if name=="mixed" {
+                zip.start_file("x/Mod.class",SimpleFileOptions::default()).unwrap();
+                zip.write_all(b"placeholder").unwrap();
+            }
+            zip.finish().unwrap();
+            let error=read_entrypoints(&jar).unwrap_err();
+            assert!(error.contains(expected),"{name}: {error}");
+        }
+        let _=fs::remove_dir_all(root);
+    }
+    #[test]
+    fn approved_snapshot_is_hash_pinned_and_rejects_changed_jar(){
+        let root=std::env::temp_dir().join(format!("fabricbridge-snapshot-test-{}",std::process::id()));
+        let _=fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let original=root.join("example.jar");
+        fs::write(&original,b"approved bytes").unwrap();
+        let expected=sha(&original).unwrap();
+        let dest=approved_snapshot(&original,&expected,&root.join("cache")).unwrap();
+        assert_eq!(sha(&dest).unwrap(),expected);
+        fs::write(&original,b"replaced bytes").unwrap();
+        assert!(approved_snapshot(&original,&expected,&root.join("cache")).is_err());
+        fs::write(&original,b"approved bytes").unwrap();
+        fs::write(&dest,b"cache tampered").unwrap();
+        assert!(approved_snapshot(&original,&expected,&root.join("cache")).is_err());
+        let _=fs::remove_dir_all(&root);
+    }
+    #[test]
+    fn bounded_jdk_output_does_not_deadlock_on_large_pipes(){
+        if Command::new("java").arg("-version").output().is_err(){return;}
+        let root=std::env::temp_dir().join(format!("fabricbridge-pipe-{}",std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let source=root.join("PipeProof.java");
+        fs::write(&source,r#"public class PipeProof {
+    public static void main(String[] args) throws Exception {
+        byte[] block=new byte[8192];
+        for(int i=0;i<256;i++){
+            System.out.write(block);
+            System.err.write(block);
+        }
+    }
+}"#).unwrap();
+        let mut cmd=Command::new("java");
+        cmd.arg(&source);
+        let out=timed(cmd,Duration::from_secs(20)).unwrap();
+        assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));
+        assert_eq!(out.stdout.len(),65536);
+        assert_eq!(out.stderr.len(),65536);
+        let _=fs::remove_dir_all(root);
     }
     #[test]
     fn runs_actual_fabric_initializer_and_exposes_command(){

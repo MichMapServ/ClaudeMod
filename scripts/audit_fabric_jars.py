@@ -48,19 +48,22 @@ def path_safe(name: str) -> bool:
 def valid_entrypoints(entrypoints: object, issues: list[dict]) -> list[tuple[str, str]]:
     found: list[tuple[str, str]] = []
     if not isinstance(entrypoints, dict):
+        issue(issues, "blocker", "invalid_entrypoints", "entrypoints doit etre un objet")
         return found
     for kind, elements in entrypoints.items():
-        if kind not in ("main", "client", "server", "preLaunch"):
-            issue(issues, "info", "custom_entrypoint", f"Entrypoint custom: {kind}")
+        if kind not in ("main", "client") and elements:
+            issue(issues, "blocker", "unsupported_entrypoint_kind", f"Entrypoint non pris en charge: {kind}")
         if not isinstance(elements, list):
-            issue(issues, "warning", "invalid_entrypoints", f"Entrypoints {kind}: liste attendue")
+            issue(issues, "blocker", "invalid_entrypoints", f"Entrypoints {kind}: liste attendue")
             continue
+        if len(elements) > 100:
+            issue(issues, "blocker", "entrypoint_limit", f"Entrypoints {kind}: plus de 100 entrees")
         for value in elements[:100]:
             adapter = "default"
             if isinstance(value, dict):
                 adapter, value = value.get("adapter", "default"), value.get("value")
             if not isinstance(value, str):
-                issue(issues, "warning", "invalid_entrypoint", f"Entrypoint {kind} invalide")
+                issue(issues, "blocker", "invalid_entrypoint", f"Entrypoint {kind} invalide")
                 continue
             found.append((kind, value))
             if adapter != "default":
@@ -98,11 +101,18 @@ def audit(path: Path) -> dict:
             if len(names) != len(set(names)):
                 issue(issues, "blocker", "duplicate_entries", "Entrees ZIP dupliquees")
             info = z.infolist()
+            total_unpacked = 0
             for entry in info:
                 if not path_safe(entry.filename):
                     issue(issues, "blocker", "unsafe_zip_path", f"Chemin archive non sur: {entry.filename[:120]}")
                 if (entry.external_attr >> 16) & 0o170000 == 0o120000:
                     issue(issues, "blocker", "symlink", f"Lien symbolique refuse: {entry.filename[:120]}")
+                total_unpacked += entry.file_size
+                if entry.file_size > 64 * 1024 * 1024 or total_unpacked > 256 * 1024 * 1024:
+                    issue(issues, "blocker", "inflated_size_limit", "Taille ZIP decompressee excessive")
+                    break
+                if entry.file_size and (not entry.compress_size or entry.file_size // entry.compress_size > 500):
+                    issue(issues, "blocker", "compression_ratio", f"Ratio ZIP suspect: {entry.filename[:120]}")
             if "fabric.mod.json" not in names:
                 result["format"] = "other_jar"
                 issue(issues, "info", "not_fabric", "Aucun fabric.mod.json")
@@ -132,11 +142,20 @@ def audit(path: Path) -> dict:
             if env == "server":
                 issue(issues, "blocker", "server_only", "Mod reserve au serveur Java")
             elif env not in ("client", "*"):
-                issue(issues, "warning", "environment", f"Environment inconnu: {str(env)[:80]}")
+                issue(issues, "blocker", "environment", f"Environment non prise en charge: {str(env)[:80]}")
             eps = valid_entrypoints(meta.get("entrypoints", {}), issues)
             result["entrypoints"] = [{"kind": kind, "class": name} for kind, name in eps[:100]]
-            if any(k not in ("main", "client") for k, _ in eps):
-                issue(issues, "blocker", "unsupported_entrypoint_kind", "Entrypoint hors main/client")
+            for kind, class_name in eps:
+                if kind not in ("main", "client"):
+                    continue
+                # Fabric permits class-only entrypoints; method entrypoints are
+                # already rejected. The current JVM runner requires a class in
+                # the top-level JAR, not a nested library or classpath provider.
+                if re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_.$]{0,179}", class_name):
+                    class_path = class_name.replace(".", "/") + ".class"
+                    if class_path not in names:
+                        issue(issues, "blocker", "missing_entrypoint_class",
+                              f"Classe initialisatrice absente: {class_name[:120]}")
             if len([k for k, _ in eps if k in ("main", "client")]) > 8:
                 issue(issues, "blocker", "too_many_entrypoints", "Plus de 8 entrypoints")
             mixes = meta.get("mixins", [])
@@ -147,19 +166,22 @@ def audit(path: Path) -> dict:
                 if mixes:
                     issue(issues, "blocker", "mixin_required", "Mixins Java non transformes dans Horizon Rust")
             else:
-                issue(issues, "warning", "invalid_mixins", "Definition mixins mal formee")
+                issue(issues, "blocker", "invalid_mixins", "Definition mixins mal formee")
             if "accessWidener" in meta:
                 issue(issues, "blocker", "access_widener", "AccessWidener Java non applique")
-            if meta.get("jars"):
+            if "jars" in meta and meta["jars"] != []:
                 issue(issues, "blocker", "nested_jars", "JARs embarques non resolus")
             dependencies = meta.get("depends", {})
             if isinstance(dependencies, dict):
                 result["dependencies"] = {str(k)[:64]: str(v)[:140] for k, v in list(dependencies.items())[:100]}
-                for dep in dependencies:
+                for dep, constraint in dependencies.items():
                     if dep not in BASE_DEPENDENCIES:
                         issue(issues, "blocker", "external_dependency", f"Dependance manquante/non resolue: {dep}")
+                    elif constraint != "*":
+                        issue(issues, "warning", "unchecked_version_constraint",
+                              f"Version de {dep} demandee ({str(constraint)[:80]}); non verifiee par le bridge")
             else:
-                issue(issues, "warning", "invalid_dependencies", "Champ depends invalide")
+                issue(issues, "blocker", "invalid_dependencies", "Champ depends invalide")
             if any(name.startswith(("net/minecraft/", "net/fabricmc/fabric/", "org/spongepowered/")) for name in names if name.endswith(".class")):
                 issue(issues, "warning", "bundled_java_api", "Classes Minecraft/Fabric/Mixin embarquees: risque de conflit de classpath")
             if any(name.endswith(".mixins.json") for name in names):
@@ -225,6 +247,7 @@ def audit(path: Path) -> dict:
                            "candidate_only" if result["entrypoints"] else "no_entrypoint")
     result["resources"] = ("candidate_only" if result["resource_candidates"] and
                            not any(i["code"] in {"unsafe_zip_path", "duplicate_entries", "symlink",
+                              "inflated_size_limit", "compression_ratio",
                               "resource_total", "resource_limit"} for i in blockers)
                            else "none_or_blocked")
     return result
