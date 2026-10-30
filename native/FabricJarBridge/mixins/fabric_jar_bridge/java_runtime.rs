@@ -71,14 +71,15 @@ fn valid_class(s:&str)->bool {
         && s.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'.'||b==b'_'||b==b'$')
 }
 fn read_entrypoints(path:&Path)->Result<(String,Vec<(String,String)>),String>{
-    if fs::metadata(path).map_err(|e|e.to_string())?.len()>128*1024*1024{
+    if fs::metadata(path).map_err(|e|e.to_string())?.len()>128*1024*1024 {
         return Err("JAR depasse 128 MiB".into());
     }
     let mut archive=ZipArchive::new(File::open(path).map_err(|e|e.to_string())?)
         .map_err(|e|e.to_string())?;
     if archive.len()>4096 {return Err("plus de 4096 fichiers JAR".into());}
     let mut names=HashSet::new();
-    for index in 0..archive.len(){
+    let mut inflated=0u64;
+    for index in 0..archive.len() {
         let entry=archive.by_index(index).map_err(|e|e.to_string())?;
         let name=entry.name();
         let path_ok = !name.is_empty() && name.len()<=512 && !name.starts_with('/')
@@ -86,11 +87,20 @@ fn read_entrypoints(path:&Path)->Result<(String,Vec<(String,String)>),String>{
             && name.trim_end_matches('/').split('/').all(|part|!part.is_empty()&&part!="."&&part!="..");
         if !path_ok {return Err("nom de fichier JAR non sur".into());}
         if !names.insert(name.to_owned()) {return Err("entree ZIP dupliquee".into());}
-        if entry.unix_mode().is_some_and(|mode| mode & 0o170000 == 0o120000){
+        if entry.unix_mode().is_some_and(|mode| mode & 0o170000 == 0o120000) {
             return Err("lien symbolique refuse dans JAR".into());
         }
-        if name.ends_with(".class") && entry.size()>16*1024*1024{
+        if name.ends_with(".class") && entry.size()>16*1024*1024 {
             return Err("classe Java individuelle trop volumineuse".into());
+        }
+        // Metadata is checked before launching Java; an attacker must not be
+        // able to hide a multi-GiB archive behind a tiny compressed ZIP.
+        if entry.size()>64*1024*1024 {return Err("entree ZIP trop volumineuse".into());}
+        inflated=inflated.saturating_add(entry.size());
+        if inflated>256*1024*1024 {return Err("JAR decompresse depasse 256 MiB".into());}
+        if entry.size()>0 && (entry.compressed_size()==0
+            || entry.size()/entry.compressed_size()>500) {
+            return Err("ratio de compression ZIP suspect".into());
         }
     }
     let mut text=String::new();
@@ -98,51 +108,68 @@ fn read_entrypoints(path:&Path)->Result<(String,Vec<(String,String)>),String>{
     if file.size()>65536 {return Err("manifest trop volumineux".into());}
     file.take(65537).read_to_string(&mut text).map_err(|e|e.to_string())?;
     let meta:serde_json::Value=serde_json::from_str(&text).map_err(|e|e.to_string())?;
+    if !meta.is_object() {return Err("fabric.mod.json doit etre un objet".into());}
     let id=meta["id"].as_str().unwrap_or("");
     if !valid_id(id) {return Err("id Fabric non pris en charge".into());}
-    // Fail closed: a successfully opened JAR is not necessarily runnable.
-    // Mixins target Java Minecraft classes that do not exist in Horizon Rust;
-    // access wideners and nested libraries cannot be silently ignored either.
-    if !meta.is_object(){return Err("fabric.mod.json doit etre un objet".into());}
-    if meta["environment"].as_str()==Some("server") {
-        return Err("mod serveur uniquement: instance native cliente".into());
+    if let Some(environment)=meta.get("environment") {
+        if !matches!(environment.as_str(),Some("*"|"client")) {
+            return Err("environment non pris en charge (client requis)".into());
+        }
     }
-    if meta["mixins"].as_array().is_some_and(|m|!m.is_empty())
-        || meta["mixins"].as_str().is_some() {
+    // No Java class transformation, language adapters, dependency resolver,
+    // or custom lifecycle: reject them instead of running a partial mod.
+    if meta.get("mixins").is_some_and(|v|!v.as_array().is_some_and(|a|a.is_empty())) {
         return Err("mixins Fabric declares: transformation Java/Minecraft NON prise en charge".into());
     }
-    if meta["accessWidener"].as_str().is_some() {
+    if meta.get("accessWidener").is_some() {
         return Err("accessWidener declare: non pris en charge".into());
     }
-    if meta["jars"].as_array().is_some_and(|j|!j.is_empty()) {
+    if meta.get("jars").is_some_and(|v|!v.as_array().is_some_and(|a|a.is_empty())) {
         return Err("JARs embarques declares: dependances non resolues".into());
     }
-    if let Some(deps)=meta["depends"].as_object(){
-        for key in deps.keys(){
+    if let Some(deps)=meta.get("depends") {
+        let deps=deps.as_object().ok_or("depends doit etre un objet")?;
+        for key in deps.keys() {
             if !matches!(key.as_str(),"minecraft"|"fabricloader"|"java") {
                 return Err(format!("dependance non prise en charge: {key}"));
             }
         }
     }
-    if meta["entrypoints"]["preLaunch"].as_array().is_some_and(|e|!e.is_empty()){
-        return Err("entrypoint preLaunch non pris en charge".into());
-    }
     let mut entries=Vec::new();
-    for kind in ["main","client"] {
-        if let Some(values)=meta["entrypoints"][kind].as_array(){
-            for v in values {
-                let class=v.as_str().or_else(||{
-                    if v["adapter"].as_str().is_none_or(|a|a=="default") {
-                        v["value"].as_str()
-                    } else {None}
-                });
-                if let Some(c)=class.filter(|c|valid_class(c)) {
-                    entries.push((kind.to_owned(),c.to_owned()));
+    if let Some(raw)=meta.get("entrypoints") {
+        let groups=raw.as_object().ok_or("entrypoints doit etre un objet")?;
+        for (kind, values) in groups {
+            let values=values.as_array().ok_or_else(||format!("entrypoint {kind}: liste requise"))?;
+            if kind!="main" && kind!="client" {
+                if !values.is_empty() {
+                    return Err(format!("entrypoint {kind} non pris en charge"));
+                }
+                continue;
+            }
+            for value in values {
+                let class=match value {
+                    serde_json::Value::String(class)=>class.as_str(),
+                    serde_json::Value::Object(obj)=>{
+                        if obj.get("adapter").and_then(|v|v.as_str()).is_some_and(|a|a!="default") {
+                            return Err(format!("entrypoint {kind}: adapter Java non pris en charge"));
+                        }
+                        obj.get("value").and_then(|v|v.as_str())
+                            .ok_or_else(||format!("entrypoint {kind}: classe invalide"))?
+                    }
+                    _=>return Err(format!("entrypoint {kind}: format invalide")),
+                };
+                if !valid_class(class) {return Err(format!("entrypoint {kind}: classe invalide"));}
+                let class_path=format!("{}.class",class.replace('.','/'));
+                if !names.contains(&class_path) {
+                    return Err(format!("entrypoint {kind}: classe absente du JAR: {class}"));
+                }
+                entries.push((kind.to_owned(),class.to_owned()));
+                if entries.len()>MAX_ENTRYPOINTS {
+                    return Err("trop d'entrypoints".into());
                 }
             }
         }
     }
-    if entries.len()>MAX_ENTRYPOINTS {return Err("trop d'entrypoints".into());}
     Ok((id.to_owned(),entries))
 }
 fn sha(path:&Path)->Result<String,String>{
@@ -156,21 +183,51 @@ fn sha(path:&Path)->Result<String,String>{
     }
     Ok(format!("{:x}",hash.finalize()))
 }
+// Continuously drain both pipes while javac runs. Waiting for process exit
+// before reading a pipe deadlocks when the compiler emits more than the OS
+// pipe buffer. Capture at most 64 KiB per pipe while draining all bytes.
+fn drain_bounded<R: Read + Send + 'static>(mut source:R)->thread::JoinHandle<Vec<u8>> {
+    thread::spawn(move ||{
+        let mut captured=Vec::new();
+        let mut block=[0u8;8192];
+        loop {
+            match source.read(&mut block) {
+                Ok(0)|Err(_)=>break,
+                Ok(n)=>{
+                    let room=65536usize.saturating_sub(captured.len());
+                    captured.extend_from_slice(&block[..n.min(room)]);
+                }
+            }
+        }
+        captured
+    })
+}
 fn timed(mut cmd:Command, limit:Duration)->Result<Output,String>{
     let mut child=cmd.stdout(Stdio::piped()).stderr(Stdio::piped())
         .spawn().map_err(|e|format!("Java/JDK indisponible: {e}"))?;
+    let stdout=drain_bounded(child.stdout.take().ok_or("stdout JDK indisponible")?);
+    let stderr=drain_bounded(child.stderr.take().ok_or("stderr JDK indisponible")?);
     let start=Instant::now();
-    loop {
-        if child.try_wait().map_err(|e|e.to_string())?.is_some() {
-            return child.wait_with_output().map_err(|e|e.to_string());
+    let status=loop {
+        match child.try_wait() {
+            Ok(Some(status))=>break status,
+            Ok(None)=>{},
+            Err(e)=>{
+                let _=child.kill();
+                let _=child.wait();
+                return Err(e.to_string());
+            }
         }
         if start.elapsed()>limit {
             let _=child.kill();
             let _=child.wait();
             return Err(format!("delai Java depasse ({}s)",limit.as_secs()));
         }
-        thread::sleep(Duration::from_millis(100));
-    }
+        thread::sleep(Duration::from_millis(50));
+    };
+    let stdout=stdout.join().map_err(|_|"lecture stdout JDK interrompue")?;
+    let stderr=stderr.join().map_err(|_|"lecture stderr JDK interrompue")?;
+    Ok(Output{status,stdout,stderr})
 }
 
 // Source-compatible Fabric interfaces and a deliberately tiny Horizon API.
@@ -456,6 +513,56 @@ mod tests {
         assert!(parse_command("HBR1\tfoo").is_none());
         assert!(parse_command("ordinary stdout line").is_none());
         assert!(parse_command(&format!("HBR1\tfoo\t{}", "x".repeat(721))).is_none());
+    }
+    #[test]
+    fn rejects_invalid_entrypoint_instead_of_silently_skipping_it(){
+        let root=std::env::temp_dir().join(format!("fabricbridge-strict-{}",std::process::id()));
+        let _=fs::create_dir_all(&root);
+        for (name,manifest,expected) in [
+            ("adapter",r#"{"id":"strict","entrypoints":{"main":[{"adapter":"kotlin","value":"x.Mod"}]}}"#,"adapter"),
+            ("custom",r#"{"id":"strict","entrypoints":{"custom":["x.Mod"]}}"#,"non pris en charge"),
+            ("malformed",r#"{"id":"strict","entrypoints":{"main":[42]}}"#,"format invalide"),
+            ("absent",r#"{"id":"strict","entrypoints":{"main":["x.Mod"]}}"#,"classe absente"),
+            ("mixed",r#"{"id":"strict","entrypoints":{"main":["x.Mod",42]}}"#,"format invalide"),
+            ("bad_environment",r#"{"id":"strict","environment":"server"}"#,"environment"),
+            ("bad_depends",r#"{"id":"strict","depends":["missing"]}"#,"depends"),
+        ] {
+            let jar=root.join(format!("{name}.jar"));
+            let mut zip=ZipWriter::new(File::create(&jar).unwrap());
+            zip.start_file("fabric.mod.json",SimpleFileOptions::default()).unwrap();
+            zip.write_all(manifest.as_bytes()).unwrap();
+            if name=="mixed" {
+                zip.start_file("x/Mod.class",SimpleFileOptions::default()).unwrap();
+                zip.write_all(b"placeholder").unwrap();
+            }
+            zip.finish().unwrap();
+            let error=read_entrypoints(&jar).unwrap_err();
+            assert!(error.contains(expected),"{name}: {error}");
+        }
+        let _=fs::remove_dir_all(root);
+    }
+    #[test]
+    fn bounded_jdk_output_does_not_deadlock_on_large_pipes(){
+        if Command::new("java").arg("-version").output().is_err(){return;}
+        let root=std::env::temp_dir().join(format!("fabricbridge-pipe-{}",std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let source=root.join("PipeProof.java");
+        fs::write(&source,r#"public class PipeProof {
+    public static void main(String[] args) throws Exception {
+        byte[] block=new byte[8192];
+        for(int i=0;i<256;i++){
+            System.out.write(block);
+            System.err.write(block);
+        }
+    }
+}"#).unwrap();
+        let mut cmd=Command::new("java");
+        cmd.arg(&source);
+        let out=timed(cmd,Duration::from_secs(20)).unwrap();
+        assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));
+        assert_eq!(out.stdout.len(),65536);
+        assert_eq!(out.stderr.len(),65536);
+        let _=fs::remove_dir_all(root);
     }
     #[test]
     fn runs_actual_fabric_initializer_and_exposes_command(){
