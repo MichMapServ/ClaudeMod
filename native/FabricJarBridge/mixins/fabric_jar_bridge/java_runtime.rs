@@ -595,6 +595,9 @@ public final class Runner {
             else if("client".equals(args[i])) ((ClientModInitializer)mod).onInitializeClient();
             else throw new IllegalArgumentException("Unsupported Fabric entrypoint");
         }
+        // Acknowledgement only after all declared initializers return.
+        System.out.println("HBR1\tREADY\tOK");
+        System.out.flush();
         java.io.BufferedReader input=new java.io.BufferedReader(
             new java.io.InputStreamReader(System.in,java.nio.charset.StandardCharsets.UTF_8));
         for(String line;(line=input.readLine())!=null;) {
@@ -697,6 +700,7 @@ fn execute_group(mods:&[(PathBuf,Vec<(String,String)>)])->Result<(),String>{
     let stdin=child.stdin.take().ok_or("stdin JVM indisponible")?;
     let stdout=child.stdout.take().ok_or("stdout JVM indisponible")?;
     let (send,receive)=sync_channel::<String>(4);
+    let (ready_send,ready_receive)=sync_channel::<()>(1);
     let generation=state().lock().map_err(|e|e.to_string())?.generation;
     thread::spawn(move ||{
         // Dedicated writer prevents slow Java mods from blocking the game tick.
@@ -729,7 +733,12 @@ fn execute_group(mods:&[(PathBuf,Vec<(String,String)>)])->Result<(),String>{
             }
             if !too_long {
                 if let Ok(line)=std::str::from_utf8(&buffer) {;
-                    if let Some((name,reply))=parse_command(line.trim_end_matches(['\r','\n'])) {
+                    let line=line.trim_end_matches(['\r','\n']);
+                    if line=="HBR1\tREADY\tOK" {
+                        let _=ready_send.try_send(());
+                        continue;
+                    }
+                    if let Some((name,reply))=parse_command(line) {
                         if let Ok(mut s)=state().lock(){
                             if s.generation==generation && s.commands.len()<MAX_COMMANDS {
                                 // Do not allow a JAR to shadow Horizon's own commands
@@ -744,6 +753,14 @@ fn execute_group(mods:&[(PathBuf,Vec<(String,String)>)])->Result<(),String>{
             }
         }
     });
+    // A spawned process is not a successfully initialized mod. Wait for
+    // Java's post-initializer acknowledgement with a strict startup deadline.
+    if ready_receive.recv_timeout(Duration::from_secs(10)).is_err() {
+        let _=child.kill();
+        let _=child.wait();
+        if let Ok(mut state)=state().lock(){state.commands.clear();}
+        return Err("initialisation Java echouee ou delai depasse (10s)".into());
+    }
     state().lock().map_err(|e|e.to_string())?.processes.push(JavaProcess{child,send});
     Ok(())
 }
@@ -851,7 +868,7 @@ pub fn inspect_and_run_all(jars:&[PathBuf])->Vec<String>{
         Ok(())=>{
             let count=loaded.iter().map(|(_,e)|e.len()).sum::<usize>();
             for &i in &selected {
-                reports[i]=format!("JVM partagee demarree ({} JARs, {count} entrypoint(s)); initialisation non garantie",loaded.len());
+                reports[i]=format!("JVM partagee initialisee ({} JARs, {count} entrypoint(s) confirmes par READY)",loaded.len());
             }
         }
         Err(e)=>{
