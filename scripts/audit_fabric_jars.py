@@ -1,0 +1,223 @@
+#!/usr/bin/env python3
+"""Offline Fabric JAR auditor for Horizon Fabric Jar Bridge (no Java execution).
+
+Usage:
+    python scripts/audit_fabric_jars.py path/to/mod.jar [other.jar ...] --json
+
+This is deliberately a diagnostic, not a promise of mod compatibility.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+from pathlib import Path, PurePosixPath
+from zipfile import ZipFile, BadZipFile
+
+MAX_JAR = 128 * 1024 * 1024
+MAX_ENTRIES = 4096
+MAX_META = 65536
+MAX_RESOURCE = 8 * 1024 * 1024
+MAX_RESOURCE_TOTAL = 64 * 1024 * 1024
+FABRIC_ID = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+HORIZON_ID = re.compile(r"^[a-z0-9_]{1,64}$")
+ALLOWED_TOP = ("assets", "data")
+EXEC_EXT = (".class", ".jar", ".dll", ".exe", ".so", ".dylib", ".bat", ".ps1", ".sh", ".wasm")
+BASE_DEPENDENCIES = frozenset({"minecraft", "fabricloader", "java"})
+RESERVED = {"fabricbridge", "help", "list", "trust"}
+
+
+def issue(issues: list[dict], severity: str, code: str, message: str) -> None:
+    issues.append({"severity": severity, "code": code, "message": message})
+
+
+def path_safe(name: str) -> bool:
+    if not name or len(name) > 512 or "\\" in name or name.startswith("/") or "\x00" in name:
+        return False
+    path = PurePosixPath(name)
+    return all(part not in ("", ".", "..") for part in name.rstrip("/").split("/")) and ".." not in path.parts
+
+
+def valid_entrypoints(entrypoints: object, issues: list[dict]) -> list[tuple[str, str]]:
+    found: list[tuple[str, str]] = []
+    if not isinstance(entrypoints, dict):
+        return found
+    for kind, elements in entrypoints.items():
+        if kind not in ("main", "client", "server", "preLaunch"):
+            issue(issues, "info", "custom_entrypoint", f"Entrypoint custom: {kind}")
+        if not isinstance(elements, list):
+            issue(issues, "warning", "invalid_entrypoints", f"Entrypoints {kind}: liste attendue")
+            continue
+        for value in elements[:100]:
+            adapter = "default"
+            if isinstance(value, dict):
+                adapter, value = value.get("adapter", "default"), value.get("value")
+            if not isinstance(value, str):
+                issue(issues, "warning", "invalid_entrypoint", f"Entrypoint {kind} invalide")
+                continue
+            found.append((kind, value))
+            if adapter != "default":
+                issue(issues, "blocker", "language_adapter", f"Adapter {adapter} necessaire")
+            if "::" in value or not re.fullmatch(r"[A-Za-z0-9_.$]{1,180}", value):
+                issue(issues, "blocker", "method_entrypoint", f"Syntaxe non prise en charge: {value[:120]}")
+    return found
+
+
+def audit(path: Path) -> dict:
+    result = {
+        "file": str(path), "format": "unknown", "id": None, "version": None,
+        "sha256": None, "entrypoints": [], "java_classes": 0,
+        "resource_candidates": 0, "classfile_major_versions": [],
+        "dependencies": {}, "mixins": [], "issues": [],
+        "execution": "not_evaluated", "resources": "not_evaluated",
+    }
+    issues = result["issues"]
+    try:
+        size = path.stat().st_size
+        if size > MAX_JAR:
+            issue(issues, "blocker", "jar_size_limit", f"JAR depasse {MAX_JAR} octets")
+            return result
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(65536), b""):
+                digest.update(block)
+        result["sha256"] = digest.hexdigest()
+
+        with ZipFile(path) as z:
+            names = z.namelist()
+            if len(names) > MAX_ENTRIES:
+                issue(issues, "blocker", "entry_limit", "Trop d'entrees ZIP")
+                return result
+            if len(names) != len(set(names)):
+                issue(issues, "blocker", "duplicate_entries", "Entrees ZIP dupliquees")
+            info = z.infolist()
+            for entry in info:
+                if not path_safe(entry.filename):
+                    issue(issues, "blocker", "unsafe_zip_path", f"Chemin archive non sur: {entry.filename[:120]}")
+                if (entry.external_attr >> 16) & 0o170000 == 0o120000:
+                    issue(issues, "blocker", "symlink", f"Lien symbolique refuse: {entry.filename[:120]}")
+            if "fabric.mod.json" not in names:
+                result["format"] = "other_jar"
+                issue(issues, "info", "not_fabric", "Aucun fabric.mod.json")
+                return result
+            result["format"] = "fabric"
+            meta_entry = z.getinfo("fabric.mod.json")
+            if meta_entry.file_size > MAX_META:
+                issue(issues, "blocker", "manifest_size", "Manifest trop volumineux")
+                return result
+            with z.open(meta_entry) as stream:
+                try:
+                    meta = json.loads(stream.read(MAX_META + 1).decode("utf-8"))
+                except (UnicodeError, ValueError) as error:
+                    issue(issues, "blocker", "manifest_json", f"Manifest JSON invalide: {error}")
+                    return result
+            if not isinstance(meta, dict):
+                issue(issues, "blocker", "manifest_shape", "Manifest JSON doit etre un objet")
+                return result
+            mod_id = meta.get("id")
+            result["id"] = mod_id if isinstance(mod_id, str) else None
+            result["version"] = str(meta.get("version", "?"))[:80]
+            if not isinstance(mod_id, str) or not FABRIC_ID.fullmatch(mod_id):
+                issue(issues, "blocker", "invalid_mod_id", "Mod ID Fabric invalide")
+            elif not HORIZON_ID.fullmatch(mod_id):
+                issue(issues, "warning", "horizon_id_rewrite", "ID Fabric avec tiret: ressources non importables par le bridge actuel")
+            env = meta.get("environment", "*")
+            if env == "server":
+                issue(issues, "blocker", "server_only", "Mod reserve au serveur Java")
+            elif env not in ("client", "*"):
+                issue(issues, "warning", "environment", f"Environment inconnu: {str(env)[:80]}")
+            eps = valid_entrypoints(meta.get("entrypoints", {}), issues)
+            result["entrypoints"] = [{"kind": kind, "class": name} for kind, name in eps[:100]]
+            if any(k not in ("main", "client") for k, _ in eps):
+                issue(issues, "blocker", "unsupported_entrypoint_kind", "Entrypoint hors main/client")
+            if len([k for k, _ in eps if k in ("main", "client")]) > 8:
+                issue(issues, "blocker", "too_many_entrypoints", "Plus de 8 entrypoints")
+            mixes = meta.get("mixins", [])
+            if isinstance(mixes, (str, dict)):
+                mixes = [mixes]
+            if isinstance(mixes, list):
+                result["mixins"] = [str(x)[:150] for x in mixes[:100]]
+                if mixes:
+                    issue(issues, "blocker", "mixin_required", "Mixins Java non transformes dans Horizon Rust")
+            else:
+                issue(issues, "warning", "invalid_mixins", "Definition mixins mal formee")
+            if "accessWidener" in meta:
+                issue(issues, "blocker", "access_widener", "AccessWidener Java non applique")
+            if meta.get("jars"):
+                issue(issues, "blocker", "nested_jars", "JARs embarques non resolus")
+            dependencies = meta.get("depends", {})
+            if isinstance(dependencies, dict):
+                result["dependencies"] = {str(k)[:64]: str(v)[:140] for k, v in list(dependencies.items())[:100]}
+                for dep in dependencies:
+                    if dep not in BASE_DEPENDENCIES:
+                        issue(issues, "blocker", "external_dependency", f"Dependance manquante/non resolue: {dep}")
+            else:
+                issue(issues, "warning", "invalid_dependencies", "Champ depends invalide")
+            if any(name.startswith(("net/minecraft/", "net/fabricmc/fabric/", "org/spongepowered/")) for name in names if name.endswith(".class")):
+                issue(issues, "warning", "bundled_java_api", "Classes Minecraft/Fabric/Mixin embarquees: risque de conflit de classpath")
+            if any(name.endswith(".mixins.json") for name in names):
+                issue(issues, "warning", "mixin_config_present", "Configuration Mixin presente dans le JAR")
+            total = 0
+            versions = set()
+            for entry in info:
+                name = entry.filename
+                if name.endswith(".class"):
+                    result["java_classes"] += 1
+                    if entry.file_size >= 8:
+                        with z.open(entry) as stream:
+                            header = stream.read(8)
+                        if header[:4] == b"\xca\xfe\xba\xbe":
+                            versions.add(int.from_bytes(header[6:8], "big"))
+                    continue
+                if not (name.startswith("assets/") or name.startswith("data/")) or entry.is_dir():
+                    continue
+                if not isinstance(mod_id, str) or not HORIZON_ID.fullmatch(mod_id):
+                    continue
+                valid_own = name.startswith((f"assets/{mod_id}/", f"data/{mod_id}/"))
+                valid_shared = name.startswith(("data/minecraft/tags/", "data/c/tags/"))
+                if not (valid_own or valid_shared) or name.lower().endswith(EXEC_EXT):
+                    continue
+                if entry.file_size > MAX_RESOURCE:
+                    issue(issues, "blocker", "resource_limit", f"Ressource trop volumineuse: {name[:100]}")
+                    continue
+                total += entry.file_size
+                result["resource_candidates"] += 1
+            result["classfile_major_versions"] = sorted(versions)
+            if total > MAX_RESOURCE_TOTAL:
+                issue(issues, "blocker", "resource_total", "Total de ressources trop volumineux")
+            if not eps:
+                issue(issues, "info", "no_java_entrypoint", "Aucun main/client Java a initialiser")
+            if result["java_classes"] and not eps:
+                issue(issues, "info", "java_classes_no_entrypoint", "Classes Java presentes sans entrypoints standards")
+    except (OSError, BadZipFile, RuntimeError, ValueError, EOFError) as e:
+        issue(issues, "blocker", "unreadable_archive", f"Impossible de lire archive: {e}")
+    blockers = [i for i in issues if i["severity"] == "blocker"]
+    result["execution"] = ("blocked" if blockers else
+                           "candidate_only" if result["entrypoints"] else "no_entrypoint")
+    result["resources"] = ("candidate_only" if result["resource_candidates"] and
+                           not any(i["code"] in {"unsafe_zip_path", "duplicate_entries", "symlink",
+                              "resource_total", "resource_limit"} for i in blockers)
+                           else "none_or_blocked")
+    return result
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("jars", type=Path, nargs="+")
+    parser.add_argument("--json", action="store_true", help="JSON machine-readable report")
+    args = parser.parse_args()
+    reports = [audit(path) for path in args.jars]
+    if args.json:
+        print(json.dumps(reports, ensure_ascii=False, indent=2))
+    else:
+        for report in reports:
+            print(f"{report['file']} : {report['format']} id={report['id']} "
+                  f"execution={report['execution']} resources={report['resources']}")
+            for item in report["issues"]:
+                print(f"  [{item['severity']}] {item['code']}: {item['message']}")
+    return 1 if any(r["format"] == "unknown" for r in reports) else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
