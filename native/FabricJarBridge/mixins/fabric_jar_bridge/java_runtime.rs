@@ -412,8 +412,9 @@ fn parse_command(line:&str)->Option<(String,String)>{
     let payload=line.strip_prefix("HBR1\t")?;
     let (name,reply)=payload.split_once('\t')?;
     if name.is_empty() || name.len()>32
+        || !name.as_bytes()[0].is_ascii_lowercase()
         || !name.bytes().all(|b|b.is_ascii_lowercase()||b.is_ascii_digit()||b==b'_')
-        || reply.len()>720 {return None;}
+        || reply.len()>720 || reply.chars().any(|c|c.is_control()) {return None;}
     Some((name.to_owned(),reply.to_owned()))
 }
 fn execute(jar:&Path,entries:&[(String,String)])->Result<(),String>{
@@ -567,6 +568,8 @@ mod tests {
     fn java_output_protocol_refuses_malformed_records(){
         assert_eq!(parse_command("HBR1\tfoo\tbar"),Some(("foo".into(),"bar".into())));
         assert!(parse_command("HBR1\tbad-name\tno").is_none());
+        assert!(parse_command("HBR1\t1bad\tno").is_none());
+        assert!(parse_command("HBR1\tgood\tcontrol\u{001b}[31m").is_none());
         assert!(parse_command("HBR1\tfoo").is_none());
         assert!(parse_command("ordinary stdout line").is_none());
         assert!(parse_command(&format!("HBR1\tfoo\t{}", "x".repeat(721))).is_none());
