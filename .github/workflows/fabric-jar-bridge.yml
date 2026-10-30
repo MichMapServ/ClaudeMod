@@ -49,6 +49,10 @@ jobs:
       CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
       - name: Install pinned Rust and system libraries
         run: |
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
@@ -91,7 +95,9 @@ jobs:
         run: cargo check --locked --no-default-features -p horizon-client --bin horizon-client
       - name: Run real bridge tests on compiled client
         working-directory: ${{ runner.temp }}/staged-horizon
-        run: cargo test --locked --no-default-features -p horizon-client --bin horizon-client fabric_jar_bridge::tests
+        run: |
+          cargo test --locked --no-default-features -p horizon-client --bin horizon-client fabric_jar_bridge::tests
+          cargo test --locked --no-default-features -p horizon-client --bin horizon-client fabric_java_bridge::tests
   gate:
     if: always()
     needs: [package, native]
