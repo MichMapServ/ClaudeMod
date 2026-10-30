@@ -394,4 +394,67 @@ public class ActualFabricMod implements net.fabricmc.api.ModInitializer {
         assert!(String::from_utf8_lossy(&out.stdout).contains("HBR1\tjavaproof\tJava Fabric a execute son bytecode"));
         let _=fs::remove_dir_all(root);
     }
+    #[test]
+    fn actual_client_tick_event_uses_live_horizon_position(){
+        if Command::new("javac").arg("-version").output().is_err(){return;}
+        let root=std::env::temp_dir().join(format!("fabricbridge-tick-test-{}",std::process::id()));
+        let _=fs::remove_dir_all(&root);
+        let src=root.join("src");let classes=root.join("classes");
+        fs::create_dir_all(&classes).unwrap();
+        let mut files=Vec::new();
+        for (name,text) in shim_files().into_iter().chain(std::iter::once((
+            "test/TickFabricMod.java",
+            r#"package test;
+import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import dev.horizon.fabricbridge.HorizonBridge;
+public class TickFabricMod implements ClientModInitializer {
+    private boolean once;
+    public void onInitializeClient() {
+        ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            if (!once && client.player != null) {
+                once=true;
+                HorizonBridge.registerCommand("javapos", "Position: "
+                    +client.player.getBlockPos().getX()+","
+                    +client.player.getBlockPos().getY()+","
+                    +client.player.getBlockPos().getZ());
+            }
+        });
+    }
+}"#,
+        ))){
+            let p=src.join(name);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(&p,text).unwrap();files.push(p);
+        }
+        let compiled=Command::new("javac").arg("-d").arg(&classes).args(&files).output().unwrap();
+        assert!(compiled.status.success(),"{}",String::from_utf8_lossy(&compiled.stderr));
+        let jar=root.join("tick.jar");
+        let mut zip=ZipWriter::new(File::create(&jar).unwrap());
+        zip.start_file("fabric.mod.json",SimpleFileOptions::default()).unwrap();
+        zip.write_all(br#"{"id":"tickproof","version":"1","entrypoints":{"client":["test.TickFabricMod"]}}"#).unwrap();
+        zip.start_file("test/TickFabricMod.class",SimpleFileOptions::default()).unwrap();
+        zip.write_all(&fs::read(classes.join("test/TickFabricMod.class")).unwrap()).unwrap();
+        zip.finish().unwrap();
+        let (id,entries)=read_entrypoints(&jar).unwrap();
+        assert_eq!(id,"tickproof");
+        assert_eq!(entries[0].0,"client");
+        let separator=if cfg!(windows){';'}else{':'};
+        let cp=format!("{}{}{}",classes.display(),separator,jar.display());
+        let mut java=Command::new("java").arg("-cp").arg(cp)
+            .arg("dev.horizon.fabricbridge.Runner").arg(&entries[0].0).arg(&entries[0].1)
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        {
+            let mut stdin=java.stdin.take().unwrap();
+            writeln!(stdin,"NONE").unwrap();
+            writeln!(stdin,"TICK\t10.9\t64.25\t-3.7").unwrap();
+            // Close stdin: Java handles EOF and exits; unit test never blocks on a persistent JVM.
+        }
+        let out=java.wait_with_output().unwrap();
+        assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));
+        assert!(String::from_utf8_lossy(&out.stdout).contains("HBR1\tjavapos\tPosition: 10,64,-4"),
+            "{}",String::from_utf8_lossy(&out.stdout));
+        let _=fs::remove_dir_all(root);
+    }
+
 }
